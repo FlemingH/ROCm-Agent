@@ -1,6 +1,6 @@
 # ROCm Libraries HIP Reference Index
 
-Source: [rocm-libraries therock-7.11](https://github.com/ROCm/rocm-libraries/releases/tag/therock-7.11). All paths relative to `../rocm-libraries/projects/`.
+Source: [rocm-libraries rocm-7.2.0](https://github.com/ROCm/rocm-libraries/releases/tag/rocm-7.2.0). All paths relative to `../../rocm-libraries/projects/`.
 
 > **Current target: gfx1100 (RDNA 3)**
 > - ✅ = Supported on gfx1100
@@ -261,6 +261,9 @@ Examples in `rocprim/example/`, benchmarks in `rocprim/benchmark/`.
 | `17_convnd_bwd_data/` | Conv backward (data) |
 | `20_grouped_conv_bwd_weight/` | Grouped Conv backward (weight) |
 | `30_grouped_conv_fwd_multiple_d/` | Grouped Conv forward + multi-D |
+| `38_grouped_conv_bwd_data_multiple_d/` | Grouped Conv backward (data) + multi-D |
+| `40_conv2d_fwd_quantization/` | Conv2D forward quantization |
+| `41_grouped_conv_conv_fwd/` | Grouped Conv + Conv forward |
 | `62_convnd_activ/` | **Conv + Activation** (gfx11 specific) |
 
 #### Normalization / Reduce / Pooling
@@ -272,6 +275,8 @@ Examples in `rocprim/example/`, benchmarks in `rocprim/benchmark/`.
 | `27_layernorm2d_fwd/` | **LayerNorm2D forward** |
 | `33_multiple_reduce/` | Multiple Reduce |
 | `34_batchnorm/` | **BatchNorm** |
+| `42_groupnorm_fwd/` | **GroupNorm forward** |
+| `45_elementwise_normalization/` | Elementwise normalization |
 | `48_pool3d_fwd/` | 3D Pooling forward |
 | `49_maxpool2d_bwd/` | MaxPool2D backward |
 | `51_avgpool3d_bwd/` | AvgPool3D backward |
@@ -285,10 +290,15 @@ Examples in `rocprim/example/`, benchmarks in `rocprim/benchmark/`.
 |--------|-------------|---------|
 | `19_binary_elementwise/` | Binary elementwise ops | ✅ |
 | `26_contraction/` | Tensor contraction | ✅ (FP32/64 limited) |
+| `35_splitK_gemm/` | Split-K GEMM | ✅ (no FP16 atomic) |
+| `36_sparse_embedding/` | Sparse embedding | ✅ |
+| `39_permute/` | Permute | ✅ |
+| `43_splitk_gemm_bias_e_permute/` | Split-K GEMM + Bias + Permute | ✅ |
+| `44_elementwise_permute/` | Elementwise + Permute | ✅ |
 | `50_put_element/` | Put Element | ✅ |
 | `52_im2col_col2im/` | Im2Col / Col2Im | ✅ |
-| `66_complex_contraction_bilinear/` | Complex contraction + Bilinear | ✅ |
 | `61_contraction_multi_ABD/` | Multi-ABD contraction | ✅ |
+| `66_complex_contraction_bilinear/` | Complex contraction + Bilinear | ✅ |
 
 ### CK Tile Examples (`composablekernel/example/ck_tile/`)
 
@@ -318,7 +328,9 @@ Examples in `rocprim/example/`, benchmarks in `rocprim/benchmark/`.
 | `36_pooling/` | Pooling | ✅ |
 | `37_transpose/` | Transpose | ✅ |
 | `38_block_scale_gemm/` | Block Scale GEMM | ⚠️ gfx94/gfx95/gfx12 only |
+| `39_copy/` | Copy kernel | ✅ |
 | `40_streamk_gemm/` | Stream-K GEMM | ⚠️ gfx9 only |
+| `41_batched_contraction/` | Batched tensor contraction | ✅ |
 
 ### CK Tutorials (`composablekernel/tutorial/ck_tile/`)
 
