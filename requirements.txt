@@ -1,0 +1,20 @@
+# ROCm-Agent dependencies
+# Install PyTorch ROCm from: https://pytorch.org/get-started/locally/
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.3
+
+# RL Training
+verl
+peft
+bitsandbytes
+transformers
+accelerate
+datasets
+
+# Inference
+vllm
+
+# Utilities
+huggingface_hub
+safetensors
+tokenizers
+sentencepiece

@@ -1,1 +1,9 @@
 CUDA-Agent/
+rocm-libraries/
+models/
+__pycache__/
+*.so
+build/
+*.egg-info/
+*.pyc
+.cache/
