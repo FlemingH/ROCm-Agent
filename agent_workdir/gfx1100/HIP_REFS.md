@@ -4,9 +4,10 @@ Source: [rocm-libraries rocm-7.2.0](https://github.com/ROCm/rocm-libraries/relea
 
 > **Current target: gfx1100 (RDNA 3)**
 > - ✅ = Supported on gfx1100
-> - ⚠️ = API reference only, not supported on gfx1100 (restriction noted)
-> - CK classic examples: use `*_wmma*` variants on gfx11 (not `*_xdl*`)
+> - ⚠️ = Not fully supported (restriction noted); may serve as API reference
+> - CK examples: use `*_wmma*` variants on gfx11 (MFMA = CDNA only, WMMA = RDNA 3/4)
 > - gfx11 lacks FP16/BF16 atomic add; split-K GEMM is limited
+> - **CMake removing GPU restrictions ≠ runtime support** — some CK examples compile for gfx11 but use MFMA instructions internally
 
 ---
 
@@ -306,7 +307,7 @@ Examples in `rocprim/example/`, benchmarks in `rocprim/benchmark/`.
 |--------|-------------|---------|
 | `01_fmha/` | Flash Multi-Head Attention (fwd + bwd) | ⚠️ gfx9/gfx12 only |
 | `02_layernorm2d/` | **LayerNorm2D** | ✅ |
-| `03_gemm/` | Tile GEMM | ⚠️ gfx90a/gfx94/gfx95 only |
+| `03_gemm/` | **Tile GEMM** | ⚠️ WMMA variants only (`universal_gemm`, `splitk`, `preshuffle`); `gemm_basic` uses MFMA |
 | `04_img2col/` | Im2Col | ✅ |
 | `05_reduce/` | Reduce | ✅ |
 | `06_permute/` | Permute | ✅ |
@@ -316,18 +317,18 @@ Examples in `rocprim/example/`, benchmarks in `rocprim/benchmark/`.
 | `12_smoothquant/` | **SmoothQuant** | ✅ |
 | `13_moe_sorting/` | MoE Sorting | ✅ |
 | `14_moe_smoothquant/` | MoE + SmoothQuant | ✅ |
-| `15_fused_moe/` | Fused MoE | ⚠️ gfx94/gfx95 only |
+| `15_fused_moe/` | Fused MoE | ⚠️ uses MFMA instructions (CDNA only, despite no CMake restriction) |
 | `16_batched_gemm/` | Batched GEMM | ✅ |
-| `17_grouped_gemm/` | Grouped GEMM | ⚠️ gfx94/gfx95 only |
+| `17_grouped_gemm/` | **Grouped GEMM** | ✅ (defaults to WMMA config) |
 | `18_flatmm/` | Flat MatMul | ⚠️ gfx908/90a/942/950 only |
 | `19_gemm_multi_d/` | GEMM + multi-D | ✅ |
 | `20_grouped_convolution/` | Grouped Conv + Bias + Clamp | ✅ |
 | `21_elementwise/` | **General elementwise ops** | ✅ |
 | `22_gemm_multi_abd/` | GEMM multi-ABD | ✅ |
-| `35_batched_transpose/` | Batched Transpose | ⚠️ gfx94/gfx95/gfx90a only |
+| `35_batched_transpose/` | Batched Transpose | ✅ (no matrix instructions) |
 | `36_pooling/` | Pooling | ✅ |
 | `37_transpose/` | Transpose | ✅ |
-| `38_block_scale_gemm/` | Block Scale GEMM | ⚠️ gfx94/gfx95/gfx12 only |
+| `38_block_scale_gemm/` | Block Scale GEMM | ⚠️ gfx94/gfx95 only |
 | `39_copy/` | Copy kernel | ✅ |
 | `40_streamk_gemm/` | Stream-K GEMM | ⚠️ gfx9 only |
 | `41_batched_contraction/` | Batched tensor contraction | ✅ |
@@ -372,6 +373,6 @@ Located in `rocwmma/test/`.
 - CK: `32_batched_gemm_scale_softmax_gemm/` with `*_wmma_fp16.cpp` (self-attention ✅)
 - CK: `21_gemm_layernorm/` (GEMM + BN + ReLU + Add + LN ✅)
 - CK: `47_gemm_bias_softmax_gemm_permute/` (✅)
+- CK: ~~`ck_tile/15_fused_moe/`~~ (⚠️ MFMA only, not supported on gfx1100)
 - CK: ~~`ck_tile/01_fmha/`~~ (⚠️ Flash Attention not supported on gfx1100, API reference only)
-- CK: ~~`ck_tile/15_fused_moe/`~~ (⚠️ gfx94/gfx95 only)
 - MIOpen: `addlayernorm_driver.hpp` (residual + LN ✅) + `rope_driver.hpp` (RoPE ✅)

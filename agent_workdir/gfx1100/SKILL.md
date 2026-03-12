@@ -63,14 +63,23 @@ ROCm official examples are in `../../rocm-libraries/projects/` (read-only). Quic
 | LayerNorm kernel | `composablekernel/example/ck_tile/02_layernorm2d/` |
 | Softmax | `composablekernel/example/23_softmax/` |
 | Elementwise | `composablekernel/example/ck_tile/21_elementwise/` |
+| Tile GEMM | `composablekernel/example/ck_tile/03_gemm/` (WMMA variants only) |
+| Grouped GEMM | `composablekernel/example/ck_tile/17_grouped_gemm/` (defaults to WMMA) |
 | Conv+Activation | `composablekernel/example/62_convnd_activ/` (gfx11 only) |
 | WMMA matrix ops | `rocwmma/test/gemm/gemm_kernel_base.cpp` |
 
-**Not supported on gfx1100** (API reference only, cannot compile/run):
+**Not supported on gfx1100** (API reference only):
 - `ck_tile/01_fmha/` — Flash Attention: gfx9/gfx12 only
-- `ck_tile/03_gemm/` — gfx90a/gfx94/gfx95 only
-- `ck_tile/15_fused_moe/` — gfx94/gfx95 only
-- `ck_tile/17_grouped_gemm/` — gfx94/gfx95 only
+- `ck_tile/15_fused_moe/` — uses MFMA instructions (CDNA only)
+- `ck_tile/18_flatmm/` — gfx908/gfx90a/gfx942/gfx950 only
+- `ck_tile/38_block_scale_gemm/` — gfx94/gfx95 only
+- `ck_tile/40_streamk_gemm/` — gfx9 only
+
+**Partially supported** (use `*_wmma*` variants only):
+- `ck_tile/03_gemm/` — `universal_gemm`, `splitk_two_stage`, `weight_preshuffle` have WMMA configs ✅; `gemm_basic` uses non-WMMA path ❌
+
+**Supported on gfx1100** (default executables use WMMA):
+- `ck_tile/17_grouped_gemm/` — Grouped GEMM ✅
 
 Full index with all examples: `HIP_REFS.md` (same folder)
 
