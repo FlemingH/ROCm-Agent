@@ -50,27 +50,27 @@
 
 ```
 ROCm-Agent/
-├── rocm-libraries/             # ROCm 官方库源码（therock-7.11，只读参考）
-│   └── projects/               # rocblas / hipblaslt / miopen / rocprim / composablekernel / rocwmma
+├── rocm-libraries/                 # ROCm 官方库源码（therock-7.11，只读参考）
+│   └── projects/                   # rocblas / hipblaslt / miopen / rocprim / composablekernel / rocwmma
 └── agent_workdir/
-    ├── gfx1100/                # 架构配置（RDNA 3）
-    │   ├── SKILL.md            # Agent 行为指令
-    │   └── HIP_REFS.md         # 示例索引（含兼容性标注）
-    ├── model.py                # 原始 PyTorch 模型（只读）
-    ├── model_new.py            # Agent 输出：优化后的模型
-    ├── binding.cpp             # 固定：pybind11 主模块绑定
-    ├── binding_registry.h      # 固定：自动注册机制
-    ├── kernels/                # Agent 工作区
-    │   ├── *.hip               # HIP 内核文件
-    │   └── *_binding.cpp       # Python 绑定文件
-    └── utils/                  # 固定工具集（不可修改）
-        ├── compile.py          # hipcc 编译（-O3, --offload-arch=gfx1100）
-        ├── compile.sh          # 编译包装器
-        ├── verification.py     # 正确性验证
-        └── profiling.py        # 性能对比
+    ├── gfx1100/                    # ── 架构目录（RDNA 3）──
+    │   ├── SKILL.md                #   Agent 行为指令（架构专属）
+    │   ├── HIP_REFS.md             #   示例索引（含兼容性标注）
+    │   ├── model_new.py            #   Agent 输出：优化后的模型
+    │   └── kernels/                #   Agent 输出：HIP 内核
+    │       ├── *.hip               #     内核文件
+    │       └── *_binding.cpp       #     Python 绑定
+    ├── binding.cpp                 # ── 共享基础设施（所有架构复用）──
+    ├── binding_registry.h          #   自动注册机制
+    ├── model.py                    #   原始 PyTorch 模型（只读，每道题变化）
+    └── utils/                      #   固定工具集（不可修改）
+        ├── compile.py              #     hipcc 编译（架构由 PYTORCH_ROCM_ARCH 传入）
+        ├── compile.sh              #     编译包装器
+        ├── verification.py         #     正确性验证
+        └── profiling.py            #     性能对比
 ```
 
-目录命名规范：`agent_workdir/<arch>/` 按架构组织配置，便于后续扩展（如 `gfx1200/SKILL.md`、`gfx1200/HIP_REFS.md`）。
+目录结构分三层：`<arch>/` 放架构专属配置和产出，共享基础设施放在 `agent_workdir/` 根目录，题目输入 `model.py` 跨架构通用。扩展新架构只需新建 `gfx1200/` 等同级目录。
 
 ### 2.2 架构配置文件
 

@@ -22,23 +22,23 @@ You are a PyTorch and HIP expert targeting AMD Radeon Pro W7800 (RDNA 3, gfx1100
 ## 2. WORKSPACE STRUCTURE
 
 ```
-.
-├── gfx1100/              # Architecture-specific config (this folder)
+agent_workdir/
+├── gfx1100/              # This folder (architecture-specific)
 │   ├── SKILL.md          # This file
-│   └── HIP_REFS.md       # Full reference index
-├── binding_registry.h    # Do NOT modify
-├── binding.cpp           # Do NOT modify
-├── kernels/              # YOUR WORK: .hip kernels + _binding.cpp
-├── utils/                # DO NOT modify
-├── model.py              # DO NOT modify
-└── model_new.py          # YOUR WORK: optimized model using custom ops
+│   ├── HIP_REFS.md       # Full reference index
+│   ├── model_new.py      # YOUR WORK: optimized model using custom ops
+│   └── kernels/          # YOUR WORK: .hip kernels + _binding.cpp
+├── binding_registry.h    # Do NOT modify (shared)
+├── binding.cpp           # Do NOT modify (shared)
+├── utils/                # DO NOT modify (shared)
+└── model.py              # DO NOT modify (input, shared)
 ```
 
 ### Reference Code
 
-ROCm official examples are in `../rocm-libraries/projects/` (read-only). Quick lookup:
+ROCm official examples are in `../../rocm-libraries/projects/` (read-only). Quick lookup:
 
-| Need | Path (under `../rocm-libraries/projects/`) |
+| Need | Path (under `../../rocm-libraries/projects/`) |
 |------|---------------------------------------------|
 | GEMM | `rocblas/clients/samples/example_sgemm.cpp` |
 | Fused GEMM+Bias+Act | `hipblaslt/clients/samples/04_hipblaslt_gemm_bias/` or `08_..._gemm_gelu_aux_bias/` |
@@ -100,15 +100,15 @@ Full index with all examples: `HIP_REFS.md` (same folder)
 ## 4. WORKFLOW
 
 ### Step 1: Implement
-Create paired files in `kernels/`:
-- `my_kernel.hip` — HIP kernel with `extern "C"` launcher (no PyTorch deps)
-- `my_kernel_binding.cpp` — PyTorch tensor wrapper + `REGISTER_BINDING` macro
+Create paired files in `kernels/` (inside this `gfx1100/` folder):
+- `kernels/my_kernel.hip` — HIP kernel with `extern "C"` launcher (no PyTorch deps)
+- `kernels/my_kernel_binding.cpp` — PyTorch tensor wrapper + `REGISTER_BINDING` macro
 
-Refer to `../rocm-libraries/projects/` examples for API patterns.
+Also create `model_new.py` in this folder. Refer to `../../rocm-libraries/projects/` for API patterns.
 
 ### Step 2: Compile and Test
 ```bash
-PYTORCH_ROCM_ARCH=gfx1100 bash utils/compile.sh
+PYTORCH_ROCM_ARCH=gfx1100 bash ../utils/compile.sh
 python3 -m utils.verification
 python3 -m utils.profiling
 ```
@@ -119,7 +119,7 @@ python3 -m utils.profiling
 1. Check boundary conditions (tid < size)
 2. Check `__syncthreads()` placement before LDS reuse
 3. Check data types and alignment
-4. Fix in `kernels/` only, recompile and retest
+4. Fix in `gfx1100/kernels/` only, recompile and retest
 
 **On performance optimization** (priority order):
 1. **Algorithmic (>50%)**: Kernel fusion, LDS tiling, memory coalescing
@@ -127,7 +127,7 @@ python3 -m utils.profiling
 3. **Fine-tuning (<20%)**: WMMA for FP16 GEMM, mixed precision, Infinity Cache locality
 
 ### Step 4: Cleanup
-Remove all intermediate files from `kernels/` — keep ONLY the final optimized version.
+Remove all intermediate files from `gfx1100/kernels/` — keep ONLY the final optimized version.
 
 ## 5. SUCCESS CRITERIA
 
