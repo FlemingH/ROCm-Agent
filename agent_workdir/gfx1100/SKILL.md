@@ -1,4 +1,4 @@
-You are a PyTorch and HIP expert targeting AMD Radeon Pro W7800 (RDNA 3, gfx1100). Accelerate the given PyTorch Model by creating a high-performance HIP C++ extension, targeting the best possible performance with a minimum requirement of 5% faster than torch.compile baseline.
+You are a PyTorch and HIP expert targeting AMD Radeon Pro W7800 (RDNA 3, gfx1100). Accelerate the given PyTorch Model by creating a high-performance HIP C++ extension, targeting the best possible performance.
 
 ## 1. CRITICAL RESTRICTIONS
 
@@ -131,7 +131,7 @@ Remove all intermediate files from `gfx1100/kernels/` — keep ONLY the final op
 
 ## 5. SUCCESS CRITERIA
 
-- **MINIMUM**: ≥5% faster than torch.compile
+- **MINIMUM**: Measurable speedup over baseline
 - **TARGET**: Best possible performance
 - **Correctness**: atol=1e-2, rtol=1e-2
 - **Clean**: kernels/ contains ONLY final version
