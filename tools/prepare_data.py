@@ -39,7 +39,12 @@ def classify_difficulty(ops: list[str]) -> str:
 
 def make_chat_sample(code: str, ops: list[str], data_source: str,
                      skill_text: str, arch: str) -> dict:
-    ops_list = ops if isinstance(ops, list) else json.loads(ops)
+    if isinstance(ops, list):
+        ops_list = ops
+    elif isinstance(ops, str) and ops.startswith("["):
+        ops_list = json.loads(ops)
+    else:
+        ops_list = [ops] if ops else []
     difficulty = classify_difficulty(ops_list)
 
     system_msg = skill_text
