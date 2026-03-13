@@ -1,9 +1,11 @@
 CUDA-Agent/
 rocm-libraries/
 models/
+data/
 __pycache__/
 *.so
 build/
 *.egg-info/
 *.pyc
 .cache/
+*_hip.hip
