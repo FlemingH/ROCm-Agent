@@ -1,0 +1,40 @@
+# ROCm-Agent dependencies for conda env "ra"
+# Platform: ROCm 7.2 / gfx1100 (Radeon Pro W7800) / Ubuntu 24.04 / Python 3.12
+#
+# PyTorch ROCm (pre-installed in conda env, do NOT pip install from PyPI):
+#   torch==2.9.1+rocm7.2.0
+#   torchvision==0.24.0+rocm7.2.0
+#   torchaudio==2.9.1
+#   triton==3.5.1+rocm7.2.0
+#
+# vLLM ROCm (install with --no-deps, then uninstall flashinfer):
+#   pip install --no-deps "https://wheels.vllm.ai/rocm/95c0f928cdeeaa21c4906e73cee6a156e1b3b995/vllm-0.17.1%2Brocm700-cp312-cp312-manylinux_2_35_x86_64.whl"
+#   pip uninstall -y flashinfer-python torch-c-dlpack-ext
+
+# RL training framework
+verl>=0.7.0
+
+# vLLM runtime deps (installed separately, see above)
+amdsmi>=7.0.2
+cachetools
+cbor2
+xgrammar>=0.1.29
+
+# Model & data
+transformers>=4.57.0
+accelerate>=1.13.0
+peft>=0.18.0
+safetensors
+tokenizers
+sentencepiece
+datasets
+huggingface_hub
+
+# Data processing
+pyarrow
+
+# Build
+ninja
+
+# Distributed
+ray

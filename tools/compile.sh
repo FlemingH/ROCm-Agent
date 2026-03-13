@@ -1,9 +1,11 @@
 #!/bin/bash
 ARCH=${PYTORCH_ROCM_ARCH:-gfx1100}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 START_TIME=$(date +%s.%N)
 
-python3 -m utils.compile --arch "$ARCH"
+cd "$PROJECT_ROOT" && python3 -m tools.compile --arch "$ARCH"
 EXIT_CODE=$?
 
 END_TIME=$(date +%s.%N)

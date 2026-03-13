@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Compile HIP/C++ sources into hip_extension.so for a target architecture."""
+"""Compile HIP/C++ sources into hip_extension.so for a target architecture.
+
+Runs from project root. Sources come from:
+  - agent_workdir/*.cpp (binding.cpp)
+  - agent_workdir/<arch>/kernels/*.hip and *.cpp
+Output goes to agent_workdir/hip_extension.so
+"""
 
 import argparse
 import os
@@ -9,30 +15,28 @@ from pathlib import Path
 
 import torch.utils.cpp_extension as cpp_ext
 
+WORKDIR = Path('agent_workdir')
+
 
 def find_sources(arch: str) -> list[str]:
-    root = Path('.')
-    arch_dir = Path(arch)
-    kernels_dir = arch_dir / 'kernels'
-
-    root_sources = [str(p) for p in root.glob('*.cpp')]
+    root_sources = [str(p) for p in WORKDIR.glob('*.cpp')]
+    kernels_dir = WORKDIR / arch / 'kernels'
     kernel_sources = []
     if kernels_dir.is_dir():
         kernel_sources = (
             [str(p) for p in kernels_dir.glob('*.hip')]
             + [str(p) for p in kernels_dir.glob('*.cpp')]
         )
-
     return sorted(set(root_sources + kernel_sources))
 
 
 def compile_kernels(arch: str) -> int:
-    build_dir = Path('build') / arch
-    output_so = Path('hip_extension.so')
+    build_dir = WORKDIR / 'build' / arch
+    output_so = WORKDIR / 'hip_extension.so'
     sources = find_sources(arch)
 
     if not sources:
-        print(f'Error: no source files found (*.cpp in root, *.hip/*.cpp in {arch}/kernels/)')
+        print(f'Error: no source files found in {WORKDIR}/*.cpp or {WORKDIR}/{arch}/kernels/')
         return 1
 
     print(f'[{arch}] Compiling {len(sources)} files: {", ".join(sources)}')
@@ -44,8 +48,7 @@ def compile_kernels(arch: str) -> int:
     if output_so.exists():
         output_so.unlink()
 
-    rocm_arch = os.environ.get('PYTORCH_ROCM_ARCH', arch)
-    extra_include = [str(Path('.').resolve())]
+    extra_include = [str(WORKDIR.resolve())]
 
     try:
         cpp_ext.load(
@@ -55,9 +58,7 @@ def compile_kernels(arch: str) -> int:
             verbose=False,
             with_cuda=True,
             extra_cflags=['-O3', '-std=c++17'],
-            extra_cuda_cflags=[
-                '-O3', '-ffast-math',
-            ],
+            extra_cuda_cflags=['-O3', '-ffast-math'],
             extra_include_paths=extra_include,
         )
     except Exception as exc:

@@ -1,0 +1,10 @@
+interaction:
+  - name: "hip_kernel"
+    class_name: "tools.hip_kernel_interaction.HipKernelInteraction"
+    config:
+      arch: "gfx1100"
+      workdir: "agent_workdir"
+      compile_timeout: 60
+      verify_timeout: 30
+      profile_timeout: 60
+      max_iterations: 20

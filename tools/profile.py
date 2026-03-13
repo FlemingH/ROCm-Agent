@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Performance profiling: Eager vs torch.compile vs HIP extension."""
+"""Performance profiling: Eager vs torch.compile vs HIP extension.
+
+Runs from project root. Loads models from agent_workdir/.
+"""
 
 import argparse
 import importlib
@@ -7,6 +10,8 @@ import os
 import sys
 import torch
 from pathlib import Path
+
+WORKDIR = Path('agent_workdir')
 
 
 def transform_tensors(tensors, fn):
@@ -27,14 +32,11 @@ def get_prof_ctx():
     )
 
 
-def load_arch_module(arch: str):
-    arch_path = Path(arch)
-    if str(arch_path) not in sys.path:
-        sys.path.insert(0, str(arch_path))
-    spec = importlib.util.spec_from_file_location("model_new", arch_path / "model_new.py")
+def load_module_from_file(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.ModelNew
+    return mod
 
 
 def benchmark_model(model, inputs, warmup_iters, run_iters):
@@ -64,8 +66,15 @@ def main():
         help="Run once for targets: torch_baseline,torch_compile,hip_extension")
     args = parser.parse_args()
 
-    from model import Model, get_inputs, get_init_inputs
-    ModelNew = load_arch_module(args.arch)
+    sys.path.insert(0, str(WORKDIR.resolve()))
+
+    model_mod = load_module_from_file("model", WORKDIR / "model.py")
+    Model = model_mod.Model
+    get_inputs = model_mod.get_inputs
+    get_init_inputs = model_mod.get_init_inputs
+
+    model_new_mod = load_module_from_file("model_new", WORKDIR / args.arch / "model_new.py")
+    ModelNew = model_new_mod.ModelNew
 
     init_inputs = get_init_inputs()
     if not isinstance(init_inputs, (list, tuple)):

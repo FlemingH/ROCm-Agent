@@ -5,7 +5,7 @@ You are a PyTorch and HIP expert targeting AMD Radeon Pro W7800 (RDNA 3, gfx1100
 ### STRICTLY FORBIDDEN
 - **NO torch operators in C++**: NEVER use `torch::*` or `torch::nn::functional::*` in binding.cpp or .hip files
 - **NO torch operations in model_new.py**: Only tensor creation and your custom ops allowed
-- **NO modifications to utils/ directory**
+- **NO modifications to tools/ directory**
 - **NO modifications to binding.cpp or binding_registry.h**: These are fixed infrastructure
 
 ### ALLOWED ONLY
@@ -30,7 +30,7 @@ agent_workdir/
 │   └── kernels/          # YOUR WORK: .hip kernels + _binding.cpp
 ├── binding_registry.h    # Do NOT modify (shared)
 ├── binding.cpp           # Do NOT modify (shared)
-├── utils/                # DO NOT modify (shared)
+├── ../../tools/          # DO NOT modify (project-level tools)
 └── model.py              # DO NOT modify (input, shared)
 ```
 
@@ -117,9 +117,9 @@ Also create `model_new.py` in this folder. Refer to `../../rocm-libraries/projec
 
 ### Step 2: Compile and Test
 ```bash
-PYTORCH_ROCM_ARCH=gfx1100 bash ../utils/compile.sh
-python3 -m utils.verification
-python3 -m utils.profiling
+PYTORCH_ROCM_ARCH=gfx1100 bash ../../tools/compile.sh
+python3 -m tools.verify --arch gfx1100
+python3 -m tools.profile --arch gfx1100
 ```
 
 ### Step 3: Iterate
