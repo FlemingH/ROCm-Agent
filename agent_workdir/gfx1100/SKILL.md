@@ -119,7 +119,7 @@ Also create `model_new.py` in this folder. Refer to `../../rocm-libraries/projec
 ```bash
 PYTORCH_ROCM_ARCH=gfx1100 bash ../../tools/compile.sh
 python3 -m tools.verify --arch gfx1100
-python3 -m tools.profile --arch gfx1100
+python3 -m tools.bench --arch gfx1100
 ```
 
 ### Step 3: Iterate

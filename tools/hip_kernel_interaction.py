@@ -1,4 +1,4 @@
-"""HIP kernel generation interaction agent for verl multi-turn Agentic RL.
+"""HIP kernel generation interaction agent for multi-turn Agentic RL.
 
 Implements BaseInteraction: the Agent generates HIP kernel code, this interaction
 compiles it, verifies correctness, profiles performance, and returns reward + feedback.
@@ -20,14 +20,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-try:
-    from verl.interactions.base import BaseInteraction
-except ImportError:
-    class BaseInteraction:
-        """Fallback for standalone testing without verl installed."""
-        def __init__(self, config: dict):
-            self.config = config
-            self.name = config.get("name", "interaction_agent")
+class BaseInteraction:
+    """Base class for interaction agents."""
+    def __init__(self, config: dict):
+        self.config = config
+        self.name = config.get("name", "interaction_agent")
 
 
 class HipKernelInteraction(BaseInteraction):
@@ -219,7 +216,7 @@ class HipKernelInteraction(BaseInteraction):
         return await self._run_cmd(cmd, self.verify_timeout)
 
     async def _run_profile(self, sandbox: Path) -> Tuple[bool, dict]:
-        cmd = ["bash", "-c", f"cd {sandbox} && python3 -m tools.profile --arch {self.arch} --iters 10"]
+        cmd = ["bash", "-c", f"cd {sandbox} && python3 -m tools.bench --arch {self.arch} --iters 10"]
         ok, output = await self._run_cmd(cmd, self.profile_timeout)
         if not ok:
             return False, {}

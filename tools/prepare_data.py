@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Convert CUDA-Agent-Ops-6K dataset to verl chat format with interaction_kwargs.
+"""Convert CUDA-Agent-Ops-6K dataset to chat format with interaction_kwargs.
 
 Reads the raw parquet (columns: ops, data_source, code) and produces
-train/val parquet files in verl's expected chat format. Each sample becomes
-a system+user prompt asking the agent to optimize the given model.py.
+train/val parquet files in chat format. Each sample becomes a system+user
+prompt asking the agent to optimize the given model.py.
 
 Usage:
     python3 tools/prepare_data.py \
@@ -77,7 +77,7 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare CUDA-Agent-Ops-6K for verl training")
+    parser = argparse.ArgumentParser(description="Prepare CUDA-Agent-Ops-6K for GRPO training")
     parser.add_argument("--input", required=True, help="Path to raw data.parquet")
     parser.add_argument("--output", required=True, help="Output directory for train/val parquet")
     parser.add_argument("--arch", default="gfx1100", help="Target GPU architecture")

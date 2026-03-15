@@ -2,6 +2,8 @@ CUDA-Agent/
 rocm-libraries/
 models/
 data/
+checkpoints/
+outputs/
 __pycache__/
 *.so
 build/
@@ -9,3 +11,6 @@ build/
 *.pyc
 .cache/
 *_hip.hip
+wandb/
+runs/
+*.log

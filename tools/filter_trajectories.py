@@ -2,7 +2,7 @@
 """Filter high-quality trajectories from Phase 1 GRPO for RFT supervised fine-tuning.
 
 Reads trajectory logs (jsonl or parquet), keeps only those with reward >= threshold,
-and outputs a parquet file suitable for verl SFT training.
+and outputs a parquet file suitable for SFT training.
 
 Usage:
     python3 tools/filter_trajectories.py \
@@ -55,7 +55,7 @@ def load_trajectories(input_path: str) -> list[dict]:
 def extract_sft_sample(traj: dict) -> dict | None:
     """Extract a (prompt, response) pair from a trajectory record.
 
-    verl stores trajectories in various formats depending on version.
+    Trajectories may be stored in various formats.
     This handles common patterns:
       - {"prompt": [...], "response": "...", "reward": float}
       - {"messages": [...], "reward": float}
