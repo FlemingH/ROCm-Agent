@@ -60,7 +60,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Profile hip_extension vs torch baseline and torch.compile."
     )
-    parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1100'))
+    parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
     parser.add_argument("--iters", type=int, default=10, help="Benchmark iterations")
     parser.add_argument("--single-run", type=str,
         help="Run once for targets: torch_baseline,torch_compile,hip_extension")

@@ -9,8 +9,8 @@ Usage:
     python3 tools/prepare_data.py \
         --input data/CUDA-Agent-Ops-6K/data.parquet \
         --output data/rocm_agent_ops/ \
-        --arch gfx1100 \
-        --skill-path agent_workdir/gfx1100/SKILL.md \
+        --arch gfx1201 \
+        --skill-path agent_workdir/gfx1201/SKILL.md \
         --val-ratio 0.1
 """
 
@@ -80,8 +80,8 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare CUDA-Agent-Ops-6K for GRPO training")
     parser.add_argument("--input", required=True, help="Path to raw data.parquet")
     parser.add_argument("--output", required=True, help="Output directory for train/val parquet")
-    parser.add_argument("--arch", default="gfx1100", help="Target GPU architecture")
-    parser.add_argument("--skill-path", default="agent_workdir/gfx1100/SKILL.md",
+    parser.add_argument("--arch", default="gfx1201", help="Target GPU architecture")
+    parser.add_argument("--skill-path", default="agent_workdir/gfx1201/SKILL.md",
                         help="Path to SKILL.md for system prompt")
     parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation split ratio")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")

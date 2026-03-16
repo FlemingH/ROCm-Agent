@@ -75,7 +75,7 @@ def load_module_from_file(name: str, path: Path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1100'))
+    parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
     args = parser.parse_args()
 
     sys.path.insert(0, str(WORKDIR.resolve()))

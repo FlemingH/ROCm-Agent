@@ -84,7 +84,7 @@ def compile_kernels(arch: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1100'))
+    parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
     args = parser.parse_args()
     return compile_kernels(args.arch)
 

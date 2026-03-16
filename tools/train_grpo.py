@@ -1,109 +1,176 @@
 #!/usr/bin/env python3
-"""GRPO training script using TRL GRPOTrainer.
+"""GRPO training: single-GPU GPTQ + LoRA + local HIP eval on R9700.
 
-Phase 1: Single-turn GRPO warmup. The model generates HIP kernel code
-for a given PyTorch model, and a reward function scores correctness/performance.
+Single-machine architecture (R9700, 32GB GDDR7, gfx1201):
+  - GPTQ 4-bit model (~18GB) + LoRA training (~4GB) = ~22GB peak
+  - HIP compile/verify/profile runs locally in the same process
 
 Usage:
-    # Single GPU
-    python3 tools/train_grpo.py --model Qwen/Qwen2.5-0.5B-Instruct
-
-    # Multi-GPU (4x W7800)
-    accelerate launch --num_processes=4 tools/train_grpo.py \
-        --model Qwen/Qwen2.5-0.5B-Instruct
-
-    # Full training with 30B model (needs quantization)
-    accelerate launch --num_processes=4 tools/train_grpo.py \
-        --model models/Qwen3-Coder-30B-A3B-Instruct \
-        --max-prompt-length 4096 --max-completion-length 8192 \
-        --batch-size 8 --epochs 5
+    python3 tools/train_grpo.py \
+      --model models/Qwen3-Coder-30B-A3B-Instruct \
+      --max-steps 100
 """
 
 import argparse
+import asyncio
 import json
 import re
-import subprocess
-import tempfile
 from pathlib import Path
 
+import torch
 import pyarrow.parquet as pq
 from datasets import Dataset
+from transformers import AutoModelForCausalLM
+from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
+
+from hip_kernel_interaction import HipKernelInteraction
 
 
 def load_dataset_from_parquet(path: str) -> Dataset:
     table = pq.read_table(path)
     data = table.to_pydict()
-
     prompts = []
     for raw_prompt in data["prompt"]:
         messages = json.loads(raw_prompt)
         prompts.append(messages)
-
     return Dataset.from_dict({"prompt": prompts})
 
 
-def hip_kernel_reward(completions: list[str], prompts: list[str] = None, **kwargs) -> list[float]:
-    """Reward function for HIP kernel generation.
+def evaluate_hip_kernel(model_code: str, agent_output: str,
+                        interaction: HipKernelInteraction) -> tuple[float, str]:
+    """Run compile/verify/profile locally and return (reward, feedback)."""
+    loop = asyncio.new_event_loop()
+    try:
+        instance_id = loop.run_until_complete(
+            interaction.start_interaction(model_code=model_code)
+        )
+        messages = [{"role": "assistant", "content": agent_output}]
+        done, feedback, reward, meta = loop.run_until_complete(
+            interaction.generate_response(instance_id, messages)
+        )
+        loop.run_until_complete(interaction.finalize_interaction(instance_id))
+        return reward, feedback
+    except Exception as e:
+        return -1.0, f"Evaluation error: {e}"
+    finally:
+        loop.close()
 
-    Scoring:
-      0.0  empty or unparseable response
-      0.1  has code blocks but won't compile
-      0.5  compiles but not verified
-      1.0  correct output (verification passes)
 
-    For the smoke test, we use a lightweight heuristic.
-    Full compile/verify/profile rewards via hip_kernel_interaction
-    are used in Phase 3 multi-turn training.
-    """
-    rewards = []
-    for completion in completions:
-        text = completion if isinstance(completion, str) else completion[-1]["content"] if completion else ""
+def make_reward_fn(interaction: HipKernelInteraction):
+    """Create a reward function using local HIP compile/verify/profile."""
 
-        if not text or len(text.strip()) < 20:
-            rewards.append(0.0)
-            continue
+    def reward_fn(completions: list[str], prompts: list = None, **kwargs) -> list[float]:
+        rewards = []
+        for i, completion in enumerate(completions):
+            text = completion if isinstance(completion, str) else (
+                completion[-1]["content"] if completion else ""
+            )
 
-        has_hip_code = bool(re.search(r'__global__|#include.*hip|hipStream_t|__shared__', text))
-        has_model_new = bool(re.search(r'class\s+ModelNew|import\s+hip_extension', text))
-        has_code_blocks = bool(re.search(r'```(?:cpp|python|hip)', text))
+            if not text or len(text.strip()) < 20:
+                rewards.append(-1.0)
+                continue
 
-        score = 0.0
-        if has_code_blocks:
-            score += 0.1
-        if has_hip_code:
-            score += 0.4
-        if has_model_new:
-            score += 0.5
+            prompt_msgs = prompts[i] if prompts else []
+            model_code = ""
+            for msg in prompt_msgs:
+                if msg.get("role") == "user":
+                    code_match = re.search(r'```python\n(.*?)\n```', msg["content"], re.DOTALL)
+                    if code_match:
+                        model_code = code_match.group(1)
+                        break
 
-        rewards.append(min(score, 1.0))
+            if not model_code:
+                rewards.append(-1.0)
+                continue
 
-    return rewards
+            reward, _ = evaluate_hip_kernel(model_code, text, interaction)
+            rewards.append(max(reward, -1.0))
+
+        return rewards
+
+    return reward_fn
+
+
+def load_model_single_gpu(model_path: str):
+    """Load GPTQ model on a single GPU."""
+    gptq_path = model_path.rstrip("/") + "-GPTQ-4bit"
+
+    if Path(gptq_path).exists():
+        print(f"Loading GPTQ model from {gptq_path}")
+        model = AutoModelForCausalLM.from_pretrained(
+            gptq_path,
+            device_map={"": 0},
+            torch_dtype=torch.bfloat16,
+        )
+    else:
+        print(f"GPTQ model not found at {gptq_path}, loading base model")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            device_map={"": 0},
+            torch_dtype=torch.bfloat16,
+        )
+
+    mem_gb = torch.cuda.memory_allocated(0) / 1e9
+    print(f"Model loaded on GPU 0: {mem_gb:.1f} GB")
+    return model
+
+
+def apply_lora(model, r: int = 8, alpha: int = 16, dropout: float = 0.05):
+    lora_config = LoraConfig(
+        r=r, lora_alpha=alpha,
+        target_modules=["q_proj", "v_proj"],
+        lora_dropout=dropout,
+        task_type="CAUSAL_LM",
+    )
+    model.enable_input_require_grads()
+    model = get_peft_model(model, lora_config)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"LoRA: {trainable / 1e6:.1f}M trainable / {total / 1e6:.1f}M total ({100 * trainable / total:.2f}%)")
+    return model
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="GRPO training for HIP kernel generation")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser = argparse.ArgumentParser(description="GRPO training (single GPU, local eval)")
+    parser.add_argument("--model", default="models/Qwen3-Coder-30B-A3B-Instruct",
+                        help="Base model path (GPTQ variant auto-detected)")
     parser.add_argument("--train-data", default="data/rocm_agent_ops/train.parquet")
-    parser.add_argument("--output-dir", default="checkpoints/phase1_grpo")
-    parser.add_argument("--max-prompt-length", type=int, default=512)
-    parser.add_argument("--max-completion-length", type=int, default=256)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--gradient-accumulation", type=int, default=2)
-    parser.add_argument("--num-generations", type=int, default=2)
+    parser.add_argument("--output-dir", default="checkpoints/grpo")
+    parser.add_argument("--max-completion-length", type=int, default=2048)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--gradient-accumulation", type=int, default=4)
+    parser.add_argument("--num-generations", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--save-steps", type=int, default=50)
     parser.add_argument("--logging-steps", type=int, default=1)
+    parser.add_argument("--lora-r", type=int, default=8)
+    parser.add_argument("--lora-alpha", type=int, default=16)
+    parser.add_argument("--arch", default="gfx1201")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
+    interaction = HipKernelInteraction({
+        "arch": args.arch,
+        "workdir": "agent_workdir",
+        "compile_timeout": 120,
+        "verify_timeout": 60,
+        "profile_timeout": 120,
+        "max_iterations": 1,
+    })
+
     dataset = load_dataset_from_parquet(args.train_data)
     print(f"Loaded {len(dataset)} training samples")
+
+    model = load_model_single_gpu(args.model)
+    model = apply_lora(model, r=args.lora_r, alpha=args.lora_alpha)
+
+    reward_fn = make_reward_fn(interaction)
 
     config = GRPOConfig(
         output_dir=args.output_dir,
@@ -116,6 +183,7 @@ def main():
         learning_rate=args.lr,
         bf16=True,
         use_vllm=False,
+        gradient_checkpointing=True,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=3,
@@ -124,16 +192,16 @@ def main():
     )
 
     trainer = GRPOTrainer(
-        model=args.model,
-        reward_funcs=hip_kernel_reward,
+        model=model,
+        reward_funcs=reward_fn,
         train_dataset=dataset,
         args=config,
     )
 
-    print(f"Starting GRPO training: model={args.model}, epochs={args.epochs}, batch={args.batch_size}")
+    print(f"Starting GRPO: model={args.model}, arch={args.arch}")
     trainer.train()
     trainer.save_model(args.output_dir)
-    print(f"Training complete. Model saved to {args.output_dir}")
+    print(f"Training complete. Saved to {args.output_dir}")
 
 
 if __name__ == "__main__":

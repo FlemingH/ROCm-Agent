@@ -11,10 +11,9 @@ Reward scheme:
 """
 
 import asyncio
-import json
 import os
+import re
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,7 +31,7 @@ class HipKernelInteraction(BaseInteraction):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.arch = config.get("arch", "gfx1100")
+        self.arch = config.get("arch", "gfx1201")
         self.workdir_template = config.get("workdir", "agent_workdir")
         self.compile_timeout = config.get("compile_timeout", 60)
         self.verify_timeout = config.get("verify_timeout", 30)
@@ -109,10 +108,6 @@ class HipKernelInteraction(BaseInteraction):
         should_stop = reward >= 3.0 or inst["iteration"] >= self.max_iterations
         return should_stop, feedback, reward, {"stage": "profiled", **profile_result}
 
-    async def calculate_score(self, instance_id: str, **kwargs) -> float:
-        inst = self._instances.get(instance_id, {})
-        return inst.get("best_reward", 0.0)
-
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
         inst = self._instances.pop(instance_id, None)
         if inst and inst.get("sandbox"):
@@ -120,20 +115,22 @@ class HipKernelInteraction(BaseInteraction):
 
     def _setup_sandbox(self, sandbox: Path, model_code: str):
         template = Path(self.workdir_template)
+        workdir = sandbox / "agent_workdir"
+        workdir.mkdir(exist_ok=True)
 
         for f in ["binding.cpp", "binding_registry.h"]:
             src = template / f
             if src.exists():
-                shutil.copy2(src, sandbox / f)
+                shutil.copy2(src, workdir / f)
 
         tools_dst = sandbox / "tools"
         tools_src = Path(__file__).resolve().parent
         if tools_src.is_dir():
             shutil.copytree(tools_src, tools_dst, ignore=shutil.ignore_patterns("__pycache__"))
 
-        (sandbox / "model.py").write_text(model_code)
+        (workdir / "model.py").write_text(model_code)
 
-        arch_dir = sandbox / self.arch
+        arch_dir = workdir / self.arch
         arch_dir.mkdir(exist_ok=True)
         (arch_dir / "kernels").mkdir(exist_ok=True)
 
@@ -145,7 +142,8 @@ class HipKernelInteraction(BaseInteraction):
 
     def _write_agent_output(self, sandbox: Path, code: str):
         """Parse agent output and write model_new.py + kernel files."""
-        arch_dir = sandbox / self.arch
+        workdir = sandbox / "agent_workdir"
+        arch_dir = workdir / self.arch
         kernels_dir = arch_dir / "kernels"
 
         for f in kernels_dir.glob("*"):
@@ -180,7 +178,6 @@ class HipKernelInteraction(BaseInteraction):
           ...code...
           ```
         """
-        import re
         blocks = {}
         pattern = re.compile(
             r'(?:\*\*|#+\s*)'
@@ -200,7 +197,6 @@ class HipKernelInteraction(BaseInteraction):
         return blocks
 
     def _extract_fenced_block(self, text: str, hint: str) -> str | None:
-        import re
         pattern = re.compile(r'```(?:python)?\n(.*?)\n```', re.DOTALL)
         for m in pattern.finditer(text):
             if hint.lower() in text[max(0, m.start()-100):m.start()].lower():
@@ -245,7 +241,6 @@ class HipKernelInteraction(BaseInteraction):
 
     def _parse_profile_output(self, output: str) -> dict | None:
         """Parse 'Torch Baseline: X.XXXus, Torch Compile: X.XXXus, HIP Extension: X.XXXus'"""
-        import re
         pattern = re.compile(
             r'Torch Baseline:\s*([\d.]+)us.*'
             r'Torch Compile:\s*([\d.]+)us.*'

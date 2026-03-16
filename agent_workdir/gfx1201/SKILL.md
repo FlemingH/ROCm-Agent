@@ -1,4 +1,4 @@
-You are a PyTorch and HIP expert targeting AMD Radeon Pro W7800 (RDNA 3, gfx1100). Accelerate the given PyTorch Model by creating a high-performance HIP C++ extension, targeting the best possible performance.
+You are a PyTorch and HIP expert targeting AMD Radeon R9700 (RDNA 4, gfx1201). Accelerate the given PyTorch Model by creating a high-performance HIP C++ extension, targeting the best possible performance.
 
 ## 1. CRITICAL RESTRICTIONS
 
@@ -23,7 +23,7 @@ You are a PyTorch and HIP expert targeting AMD Radeon Pro W7800 (RDNA 3, gfx1100
 
 ```
 agent_workdir/
-├── gfx1100/              # This folder (architecture-specific)
+├── gfx1201/              # This folder (architecture-specific)
 │   ├── SKILL.md          # This file
 │   ├── HIP_REFS.md       # Full reference index
 │   ├── model_new.py      # YOUR WORK: optimized model using custom ops
@@ -55,44 +55,42 @@ ROCm official examples are in `../../rocm-libraries/projects/` (read-only). Quic
 | GroupNorm | `miopen/driver/groupnorm_driver.hpp` |
 | Conv+BN+Act fusion | `miopen/driver/CBAInferFusion_driver.hpp` |
 | Reduce/Scan/Sort | `rocprim/benchmark/benchmark_device_reduce.cpp` / `..._scan.cpp` / `..._radix_sort.cpp` |
-| GEMM+Bias+ReLU | `composablekernel/example/03_gemm_bias_relu/` (use `*_wmma*` variants) |
-| GEMM+Add+FastGELU | `composablekernel/example/04_gemm_add_add_fastgelu/` (use `*_wmma*` variants) |
+| GEMM+Bias+ReLU | `composablekernel/example/03_gemm_bias_relu/` |
+| GEMM+Add+FastGELU | `composablekernel/example/04_gemm_add_add_fastgelu/` |
 | GEMM+LN fusion | `composablekernel/example/21_gemm_layernorm/` |
-| Self-Attention (WMMA) | `composablekernel/example/32_.../self_attention_forward_wmma_fp16.cpp` |
+| **Flash Attention** | `composablekernel/example/ck_tile/01_fmha/` ✅ **gfx12 natively supported** |
+| Self-Attention | `composablekernel/example/32_.../self_attention_forward_wmma_fp16.cpp` |
 | RMSNorm kernel | `composablekernel/example/ck_tile/10_rmsnorm2d/` |
 | LayerNorm kernel | `composablekernel/example/ck_tile/02_layernorm2d/` |
 | Softmax | `composablekernel/example/23_softmax/` |
 | Elementwise | `composablekernel/example/ck_tile/21_elementwise/` |
-| Tile GEMM | `composablekernel/example/ck_tile/03_gemm/` (WMMA variants only) |
-| Grouped GEMM | `composablekernel/example/ck_tile/17_grouped_gemm/` (defaults to WMMA) |
-| Conv+Activation | `composablekernel/example/62_convnd_activ/` (gfx11 only) |
+| Tile GEMM | `composablekernel/example/ck_tile/03_gemm/` ✅ all variants |
+| Grouped GEMM | `composablekernel/example/ck_tile/17_grouped_gemm/` |
+| Conv+Activation | `composablekernel/example/62_convnd_activ/` |
 | WMMA matrix ops | `rocwmma/test/gemm/gemm_kernel_base.cpp` |
 
-**Not supported on gfx1100** (API reference only):
-- `ck_tile/01_fmha/` — Flash Attention: gfx9/gfx12 only
+**Not supported on gfx1201**:
 - `ck_tile/15_fused_moe/` — uses MFMA instructions (CDNA only)
 - `ck_tile/18_flatmm/` — gfx908/gfx90a/gfx942/gfx950 only
 - `ck_tile/38_block_scale_gemm/` — gfx94/gfx95 only
 - `ck_tile/40_streamk_gemm/` — gfx9 only
 
-**Partially supported** (use `*_wmma*` variants only):
-- `ck_tile/03_gemm/` — `universal_gemm`, `splitk_two_stage`, `weight_preshuffle` have WMMA configs ✅; `gemm_basic` uses non-WMMA path ❌
-
-**Supported on gfx1100** (default executables use WMMA):
-- `ck_tile/17_grouped_gemm/` — Grouped GEMM ✅
-
 Full index with all examples: `HIP_REFS.md` (same folder)
 
-## 3. RDNA 3 (gfx1100) HARDWARE
+## 3. RDNA 4 (gfx1201) HARDWARE
 
 | Feature | Spec | Optimization |
 |---------|------|-------------|
 | Wavefront | **32** (= CUDA warp) | Align to 32-thread boundaries |
 | LDS | 64 KB/CU | `__shared__` for data reuse; ≤64KB |
-| Infinity Cache | 96 MB L3 | Spatial/temporal locality for large working sets |
-| WMMA | AI Accelerators | FP16 matrix multiply |
-| VGPR | 1536/CU | Balance registers vs occupancy |
-| Memory bus | 256-bit GDDR6 | Coalesced 128-byte access |
+| Infinity Cache | L3 cache | Spatial/temporal locality |
+| WMMA | AI Accelerators (improved) | FP16/BF16 matrix multiply; **FP8 WMMA** (gfx12 exclusive) |
+| Memory | 32GB GDDR7 | Higher bandwidth than GDDR6 |
+
+**gfx12 exclusive features** (not available on gfx11):
+- `CK_USE_WMMA_FP8`: WMMA FP8 matrix ops
+- `CK_USE_OCP_FP8`: OCP FP8 format support
+- Flash Attention via ck_tile/01_fmha/ (gfx9 + gfx12 only, not gfx11)
 
 ### CUDA → HIP
 
@@ -104,22 +102,22 @@ Full index with all examples: `HIP_REFS.md` (same folder)
 | warp = 32 | wavefront = 32 (identical) |
 | `__shfl_sync(mask, val, src)` | `__shfl(val, src)` (no mask) |
 | cuBLAS / cuDNN / CUB | rocBLAS+hipBLASLt / MIOpen / rocPRIM |
-| `TORCH_CUDA_ARCH_LIST=9.0` | `PYTORCH_ROCM_ARCH=gfx1100` |
+| `TORCH_CUDA_ARCH_LIST=9.0` | `PYTORCH_ROCM_ARCH=gfx1201` |
 
 ## 4. WORKFLOW
 
 ### Step 1: Implement
-Create paired files in `kernels/` (inside this `gfx1100/` folder):
+Create paired files in `kernels/` (inside this `gfx1201/` folder):
 - `kernels/my_kernel.hip` — HIP kernel with `extern "C"` launcher (no PyTorch deps)
 - `kernels/my_kernel_binding.cpp` — PyTorch tensor wrapper + `REGISTER_BINDING` macro
 
-Also create `model_new.py` in this folder. Refer to `../../rocm-libraries/projects/` for API patterns.
+Also create `model_new.py` in this folder.
 
 ### Step 2: Compile and Test
 ```bash
-PYTORCH_ROCM_ARCH=gfx1100 bash ../../tools/compile.sh
-python3 -m tools.verify --arch gfx1100
-python3 -m tools.bench --arch gfx1100
+PYTORCH_ROCM_ARCH=gfx1201 bash ../../tools/compile.sh
+python3 -m tools.verify --arch gfx1201
+python3 -m tools.bench --arch gfx1201
 ```
 
 ### Step 3: Iterate
@@ -128,15 +126,15 @@ python3 -m tools.bench --arch gfx1100
 1. Check boundary conditions (tid < size)
 2. Check `__syncthreads()` placement before LDS reuse
 3. Check data types and alignment
-4. Fix in `gfx1100/kernels/` only, recompile and retest
+4. Fix in `gfx1201/kernels/` only, recompile and retest
 
 **On performance optimization** (priority order):
 1. **Algorithmic (>50%)**: Kernel fusion, LDS tiling, memory coalescing
 2. **Hardware (20–50%)**: Vectorized loads (float4), wavefront primitives, occupancy tuning
-3. **Fine-tuning (<20%)**: WMMA for FP16 GEMM, mixed precision, Infinity Cache locality
+3. **Fine-tuning (<20%)**: WMMA for FP16 GEMM, mixed precision, cache locality
 
 ### Step 4: Cleanup
-Remove all intermediate files from `gfx1100/kernels/` — keep ONLY the final optimized version.
+Remove all intermediate files from `gfx1201/kernels/` — keep ONLY the final optimized version.
 
 ## 5. SUCCESS CRITERIA
 

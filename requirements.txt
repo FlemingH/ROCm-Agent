@@ -1,5 +1,6 @@
 # ROCm-Agent dependencies for conda env "ra"
-# Platform: ROCm 7.2 / gfx1100 (Radeon Pro W7800) / Ubuntu 24.04 / Python 3.12
+# Single-machine: R9700 (gfx1201, 32GB GDDR7)
+# Platform: ROCm 7.2 / Ubuntu 24.04 / Python 3.12
 #
 # PyTorch ROCm (pre-installed in conda env, do NOT pip install from PyPI):
 #   torch==2.9.1+rocm7.2.0
@@ -11,9 +12,10 @@
 trl>=0.29.0
 accelerate>=1.13.0
 
-# Model & data
+# Model & quantization
 transformers>=4.56.2,<5.0
 peft>=0.18.0
+auto-gptq>=0.7.0
 safetensors
 tokenizers
 sentencepiece
@@ -23,5 +25,6 @@ huggingface_hub
 # Data processing
 pyarrow
 
-# Build
+# Build tools (HIP compilation)
 ninja
+cmake
