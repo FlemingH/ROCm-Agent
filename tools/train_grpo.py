@@ -92,25 +92,23 @@ def make_reward_fn(interaction: HipKernelInteraction):
     return reward_fn
 
 
-def load_model_single_gpu(model_path: str):
-    """Load GPTQ model on a single GPU."""
+def resolve_model_path(model_path: str) -> str:
+    """Resolve to GPTQ variant if available."""
     gptq_path = model_path.rstrip("/") + "-GPTQ-4bit"
-
     if Path(gptq_path).exists():
-        print(f"Loading GPTQ model from {gptq_path}")
-        model = AutoModelForCausalLM.from_pretrained(
-            gptq_path,
-            device_map={"": 0},
-            dtype=torch.bfloat16,
-        )
-    else:
-        print(f"GPTQ model not found at {gptq_path}, loading base model")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            device_map={"": 0},
-            dtype=torch.bfloat16,
-        )
+        return gptq_path
+    return model_path
 
+
+def load_model_single_gpu(model_path: str):
+    """Load GPTQ or base model on a single GPU."""
+    resolved = resolve_model_path(model_path)
+    print(f"Loading model from {resolved}")
+    model = AutoModelForCausalLM.from_pretrained(
+        resolved,
+        device_map={"": 0},
+        dtype=torch.bfloat16,
+    )
     mem_gb = torch.cuda.memory_allocated(0) / 1e9
     print(f"Model loaded on GPU 0: {mem_gb:.1f} GB")
     return model
@@ -167,10 +165,12 @@ def main():
     dataset = load_dataset_from_parquet(args.train_data)
     print(f"Loaded {len(dataset)} training samples")
 
+    resolved_model_path = resolve_model_path(args.model)
+
     model = load_model_single_gpu(args.model)
     model = apply_lora(model, r=args.lora_r, alpha=args.lora_alpha)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
