@@ -20,7 +20,7 @@ from pathlib import Path
 import torch
 import pyarrow.parquet as pq
 from datasets import Dataset
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
 
@@ -101,14 +101,14 @@ def load_model_single_gpu(model_path: str):
         model = AutoModelForCausalLM.from_pretrained(
             gptq_path,
             device_map={"": 0},
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
     else:
         print(f"GPTQ model not found at {gptq_path}, loading base model")
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             device_map={"": 0},
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
 
     mem_gb = torch.cuda.memory_allocated(0) / 1e9
@@ -170,7 +170,14 @@ def main():
     model = load_model_single_gpu(args.model)
     model = apply_lora(model, r=args.lora_r, alpha=args.lora_alpha)
 
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     reward_fn = make_reward_fn(interaction)
+
+    gen_batch = max(args.batch_size, args.num_generations)
+    gen_batch = gen_batch - (gen_batch % args.num_generations)
 
     config = GRPOConfig(
         output_dir=args.output_dir,
@@ -179,6 +186,7 @@ def main():
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation,
         num_generations=args.num_generations,
+        generation_batch_size=gen_batch,
         max_completion_length=args.max_completion_length,
         learning_rate=args.lr,
         bf16=True,
@@ -196,6 +204,7 @@ def main():
         reward_funcs=reward_fn,
         train_dataset=dataset,
         args=config,
+        processing_class=tokenizer,
     )
 
     print(f"Starting GRPO: model={args.model}, arch={args.arch}")
