@@ -184,24 +184,40 @@ R9700 (单卡 32GB, gfx1201)
 
 ```bash
 conda activate ra
-cd /path/to/ROCm-Agent
+cd /home/test/ROCm-Agent
 
-# 1. 准备数据
+# 0. 安装依赖（首次运行）
+pip install trl accelerate "transformers>=4.56.2,<5.0" peft \
+  gptqmodel optimum safetensors tokenizers sentencepiece \
+  datasets huggingface_hub pyarrow ninja cmake
+# gptqmodel 需要 --no-build-isolation：
+pip install -v gptqmodel --no-build-isolation
+
+# 1. 下载数据集和模型（首次运行）
+huggingface-cli download ASKDESC/CUDA-Agent-Ops-6K \
+  --local-dir data/CUDA-Agent-Ops-6K --repo-type dataset
+huggingface-cli download btbtyler09/Qwen3-Coder-30B-A3B-Instruct-gptq-4bit \
+  --local-dir models/Qwen3-Coder-30B-A3B-Instruct-GPTQ-4bit
+
+# 2. 准备数据
 python3 tools/prepare_data.py \
   --input data/CUDA-Agent-Ops-6K/data.parquet \
   --output data/rocm_agent_ops/ \
   --arch gfx1201 \
   --skill-path agent_workdir/gfx1201/SKILL.md
 
-# 2. 启动训练
+# 3. 启动训练（模型 A: Qwen3-Coder-30B-A3B MoE GPTQ 4-bit）
 python3 tools/train_grpo.py \
   --model models/Qwen3-Coder-30B-A3B-Instruct \
+  --train-data data/rocm_agent_ops/train.parquet \
   --batch-size 2 \
   --num-generations 4 \
   --gradient-accumulation 4 \
   --max-completion-length 2048 \
   --lr 1e-6 \
-  --epochs 5
+  --epochs 5 \
+  --save-steps 50 \
+  --logging-steps 1
 ```
 
 ---
