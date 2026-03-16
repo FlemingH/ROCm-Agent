@@ -15,7 +15,8 @@ accelerate>=1.13.0
 # Model & quantization
 transformers>=4.56.2,<5.0
 peft>=0.18.0
-auto-gptq>=0.7.0
+gptqmodel>=5.7.0
+optimum>=2.1.0
 safetensors
 tokenizers
 sentencepiece
