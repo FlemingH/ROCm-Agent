@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""GRPO training: single-GPU GPTQ + LoRA + local HIP eval on R9700.
+"""GRPO training: single-GPU + LoRA + parallel local HIP eval on R9700.
 
-Single-machine architecture (R9700, 32GB GDDR7, gfx1201):
-  - GPTQ 4-bit model (~18GB) + LoRA training (~4GB) = ~22GB peak
-  - HIP compile/verify/profile runs locally in the same process
+Optimized for ~2 day training on R9700 (32GB GDDR7, gfx1201):
+  - BF16 model (3-7B) + LoRA training
+  - Parallel reward computation (multi-process hipcc compile/verify/profile)
 
 Usage:
     python3 tools/train_grpo.py \
-      --model models/Qwen3-Coder-30B-A3B-Instruct \
-      --max-steps 100
+      --model models/Qwen2.5-Coder-3B-Instruct \
+      --max-steps 5
 """
 
 import argparse
 import asyncio
 import json
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import torch
@@ -25,6 +27,8 @@ from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
 
 from hip_kernel_interaction import HipKernelInteraction
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_dataset_from_parquet(path: str) -> Dataset:
@@ -37,38 +41,47 @@ def load_dataset_from_parquet(path: str) -> Dataset:
     return Dataset.from_dict({"prompt": prompts})
 
 
-def evaluate_hip_kernel(model_code: str, agent_output: str,
-                        interaction: HipKernelInteraction) -> tuple[float, str]:
-    """Run compile/verify/profile locally and return (reward, feedback)."""
+def _evaluate_single(args_tuple: tuple) -> float:
+    """Worker function for parallel reward. Runs in a subprocess."""
+    model_code, agent_output, arch, workdir_abs = args_tuple
+    interaction = HipKernelInteraction({
+        "arch": arch,
+        "workdir": workdir_abs,
+        "compile_timeout": 90,
+        "verify_timeout": 30,
+        "profile_timeout": 60,
+        "max_iterations": 1,
+    })
     loop = asyncio.new_event_loop()
     try:
-        instance_id = loop.run_until_complete(
+        iid = loop.run_until_complete(
             interaction.start_interaction(model_code=model_code)
         )
         messages = [{"role": "assistant", "content": agent_output}]
-        done, feedback, reward, meta = loop.run_until_complete(
-            interaction.generate_response(instance_id, messages)
+        _, _, reward, _ = loop.run_until_complete(
+            interaction.generate_response(iid, messages)
         )
-        loop.run_until_complete(interaction.finalize_interaction(instance_id))
-        return reward, feedback
-    except Exception as e:
-        return -1.0, f"Evaluation error: {e}"
+        loop.run_until_complete(interaction.finalize_interaction(iid))
+        return max(reward, -1.0)
+    except Exception:
+        return -1.0
     finally:
         loop.close()
 
 
-def make_reward_fn(interaction: HipKernelInteraction):
-    """Create a reward function using local HIP compile/verify/profile."""
+def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4):
+    """Create a parallel reward function using ProcessPoolExecutor."""
+    executor = ProcessPoolExecutor(max_workers=num_workers)
 
     def reward_fn(completions: list[str], prompts: list = None, **kwargs) -> list[float]:
-        rewards = []
+        tasks = []
         for i, completion in enumerate(completions):
             text = completion if isinstance(completion, str) else (
                 completion[-1]["content"] if completion else ""
             )
 
             if not text or len(text.strip()) < 20:
-                rewards.append(-1.0)
+                tasks.append(None)
                 continue
 
             prompt_msgs = prompts[i] if prompts else []
@@ -81,11 +94,27 @@ def make_reward_fn(interaction: HipKernelInteraction):
                         break
 
             if not model_code:
-                rewards.append(-1.0)
+                tasks.append(None)
                 continue
 
-            reward, _ = evaluate_hip_kernel(model_code, text, interaction)
-            rewards.append(max(reward, -1.0))
+            tasks.append((model_code, text, arch, workdir_abs))
+
+        futures = []
+        for task in tasks:
+            if task is None:
+                futures.append(None)
+            else:
+                futures.append(executor.submit(_evaluate_single, task))
+
+        rewards = []
+        for f in futures:
+            if f is None:
+                rewards.append(-1.0)
+            else:
+                try:
+                    rewards.append(f.result(timeout=180))
+                except Exception:
+                    rewards.append(-1.0)
 
         return rewards
 
@@ -101,7 +130,7 @@ def resolve_model_path(model_path: str) -> str:
 
 
 def load_model_single_gpu(model_path: str):
-    """Load GPTQ or base model on a single GPU."""
+    """Load model on a single GPU."""
     resolved = resolve_model_path(model_path)
     print(f"Loading model from {resolved}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -130,37 +159,33 @@ def apply_lora(model, r: int = 8, alpha: int = 16, dropout: float = 0.05):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="GRPO training (single GPU, local eval)")
-    parser.add_argument("--model", default="models/Qwen3-Coder-30B-A3B-Instruct",
-                        help="Base model path (GPTQ variant auto-detected)")
+    parser = argparse.ArgumentParser(description="GRPO training (single GPU, parallel eval)")
+    parser.add_argument("--model", default="models/Qwen2.5-Coder-3B-Instruct",
+                        help="Model path (GPTQ variant auto-detected)")
     parser.add_argument("--train-data", default="data/rocm_agent_ops/train.parquet")
     parser.add_argument("--output-dir", default="checkpoints/grpo")
-    parser.add_argument("--max-completion-length", type=int, default=2048)
+    parser.add_argument("--max-completion-length", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation", type=int, default=4)
-    parser.add_argument("--num-generations", type=int, default=4)
+    parser.add_argument("--num-generations", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-6)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=-1)
-    parser.add_argument("--save-steps", type=int, default=50)
+    parser.add_argument("--save-steps", type=int, default=100)
     parser.add_argument("--logging-steps", type=int, default=1)
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--arch", default="gfx1201")
+    parser.add_argument("--reward-workers", type=int, default=4,
+                        help="Parallel workers for reward computation")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    interaction = HipKernelInteraction({
-        "arch": args.arch,
-        "workdir": "agent_workdir",
-        "compile_timeout": 120,
-        "verify_timeout": 60,
-        "profile_timeout": 120,
-        "max_iterations": 1,
-    })
+    os.chdir(PROJECT_ROOT)
+    workdir_abs = str(PROJECT_ROOT / "agent_workdir")
 
     dataset = load_dataset_from_parquet(args.train_data)
     print(f"Loaded {len(dataset)} training samples")
@@ -174,7 +199,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    reward_fn = make_reward_fn(interaction)
+    reward_fn = make_reward_fn(args.arch, workdir_abs, args.reward_workers)
 
     gen_batch = max(args.batch_size, args.num_generations)
     gen_batch = gen_batch - (gen_batch % args.num_generations)
@@ -207,7 +232,15 @@ def main():
         processing_class=tokenizer,
     )
 
-    print(f"Starting GRPO: model={args.model}, arch={args.arch}")
+    eff_batch = args.batch_size * args.gradient_accumulation
+    steps_per_epoch = len(dataset) // eff_batch
+    total_steps = steps_per_epoch * args.epochs if args.max_steps < 0 else args.max_steps
+    print(f"Starting GRPO: model={resolved_model_path}, arch={args.arch}")
+    print(f"  epochs={args.epochs}, steps/epoch={steps_per_epoch}, total={total_steps}")
+    print(f"  batch={args.batch_size}, grad_accum={args.gradient_accumulation}, eff_batch={eff_batch}")
+    print(f"  num_gen={args.num_generations}, max_len={args.max_completion_length}")
+    print(f"  reward_workers={args.reward_workers}")
+
     trainer.train()
     trainer.save_model(args.output_dir)
     print(f"Training complete. Saved to {args.output_dir}")
