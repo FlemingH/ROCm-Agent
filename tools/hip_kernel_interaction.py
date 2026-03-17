@@ -1,13 +1,15 @@
-"""HIP kernel generation interaction agent for multi-turn Agentic RL.
+"""HIP kernel interaction agent: compile, verify, profile, and score.
 
-Implements BaseInteraction: the Agent generates HIP kernel code, this interaction
-compiles it, verifies correctness, profiles performance, and returns reward + feedback.
-
-Reward scheme:
-  -1  compile or verification failure
-  +1  correct output (passes verification)
-  +2  faster than Eager baseline by >5%
-  +3  faster than both Eager and torch.compile by >5%
+Reward scheme (graduated):
+  -1.0   no code files found
+  -0.9   partial files only
+  -0.75  model_new + one of hip/binding
+  -0.5   all 3 files, syntax error
+  -0.25  all 3 files, linker error
+   0.0   compiled OK, verification failed
+  +1.0   verification passed
+  +2.0   faster than Eager by >5%
+  +3.0   faster than both Eager and torch.compile by >5%
 """
 
 import asyncio
@@ -19,18 +21,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-class BaseInteraction:
-    """Base class for interaction agents."""
-    def __init__(self, config: dict):
-        self.config = config
-        self.name = config.get("name", "interaction_agent")
 
-
-class HipKernelInteraction(BaseInteraction):
-    """Multi-turn interaction agent that compiles/verifies/profiles HIP kernels."""
+class HipKernelInteraction:
+    """Single- or multi-turn agent that compiles/verifies/profiles HIP kernels."""
 
     def __init__(self, config: dict):
-        super().__init__(config)
         self.arch = config.get("arch", "gfx1201")
         self.workdir_template = config.get("workdir", "agent_workdir")
         self.compile_timeout = config.get("compile_timeout", 60)
@@ -40,78 +35,71 @@ class HipKernelInteraction(BaseInteraction):
         self._instances: Dict[str, dict] = {}
 
     async def start_interaction(self, instance_id: Optional[str] = None,
-                                 model_code: str = "", **kwargs) -> str:
+                                 model_code: str = "") -> str:
         if instance_id is None:
             instance_id = str(uuid4())
-
         sandbox = Path(tempfile.mkdtemp(prefix=f"hip_sandbox_{instance_id[:8]}_"))
         self._setup_sandbox(sandbox, model_code)
-
         self._instances[instance_id] = {
             "sandbox": sandbox,
-            "model_code": model_code,
             "iteration": 0,
-            "last_reward": 0.0,
-            "best_reward": 0.0,
-            "compile_ok": False,
-            "verify_ok": False,
-            "profile_result": None,
         }
         return instance_id
 
     async def generate_response(self, instance_id: str,
                                  messages: List[Dict[str, Any]],
-                                 **kwargs) -> Tuple[bool, str, float, Dict[str, Any]]:
+                                 ) -> Tuple[bool, str, float, Dict[str, Any]]:
         inst = self._instances[instance_id]
         inst["iteration"] += 1
         sandbox = inst["sandbox"]
 
         assistant_code = self._extract_last_assistant(messages)
         if not assistant_code:
-            return False, "No code found in your response. Please provide HIP kernel code.", -1.0, {}
+            return False, "No code found.", -1.0, {}
 
         self._write_agent_output(sandbox, assistant_code)
 
+        parsed = self._parse_code_blocks(assistant_code)
+        has_model_new = "model_new.py" in parsed
+        has_hip = any(k.endswith(".hip") for k in parsed)
+        has_binding = any(k.endswith("_binding.cpp") for k in parsed)
+
+        if not has_model_new and not has_hip:
+            should_stop = inst["iteration"] >= self.max_iterations
+            return should_stop, "No code files found.", -1.0, {"stage": "no_code"}
+
         compile_ok, compile_msg = await self._run_compile(sandbox)
         if not compile_ok:
-            inst["compile_ok"] = False
-            inst["last_reward"] = -1.0
-            feedback = f"Compilation failed:\n{compile_msg}\n\nFix the errors and try again."
+            if has_model_new and has_hip and has_binding:
+                reward = -0.25 if ("undefined" in compile_msg.lower() or "linker" in compile_msg.lower()) else -0.5
+            elif has_model_new and (has_hip or has_binding):
+                reward = -0.75
+            else:
+                reward = -0.9
             should_stop = inst["iteration"] >= self.max_iterations
-            return should_stop, feedback, -1.0, {"stage": "compile_error"}
-
-        inst["compile_ok"] = True
+            return should_stop, f"Compilation failed (reward {reward:.2f}):\n{compile_msg}", reward, {"stage": "compile_error"}
 
         verify_ok, verify_msg = await self._run_verify(sandbox)
         if not verify_ok:
-            inst["verify_ok"] = False
-            inst["last_reward"] = -1.0
-            feedback = f"Verification failed:\n{verify_msg}\n\nFix correctness issues and try again."
             should_stop = inst["iteration"] >= self.max_iterations
-            return should_stop, feedback, -1.0, {"stage": "verify_error"}
-
-        inst["verify_ok"] = True
+            return should_stop, f"Compiled OK, verification failed (reward 0.0):\n{verify_msg}", 0.0, {"stage": "verify_error"}
 
         profile_ok, profile_result = await self._run_profile(sandbox)
         if not profile_ok:
-            inst["last_reward"] = 1.0
-            feedback = "Verification passed but profiling failed. Reward: +1 (correct)."
             should_stop = inst["iteration"] >= self.max_iterations
-            return should_stop, feedback, 1.0, {"stage": "profile_error"}
+            return should_stop, "Verification passed, profiling failed. Reward: +1.", 1.0, {"stage": "profile_error"}
 
         reward = self._compute_reward(profile_result)
-        inst["last_reward"] = reward
-        inst["best_reward"] = max(inst["best_reward"], reward)
-        inst["profile_result"] = profile_result
-
         feedback = self._format_profile_feedback(profile_result, reward)
         should_stop = reward >= 3.0 or inst["iteration"] >= self.max_iterations
         return should_stop, feedback, reward, {"stage": "profiled", **profile_result}
 
-    async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
+    async def finalize_interaction(self, instance_id: str) -> None:
         inst = self._instances.pop(instance_id, None)
         if inst and inst.get("sandbox"):
             shutil.rmtree(inst["sandbox"], ignore_errors=True)
+
+    # --- Sandbox setup ---
 
     def _setup_sandbox(self, sandbox: Path, model_code: str):
         template = Path(self.workdir_template)
@@ -123,16 +111,17 @@ class HipKernelInteraction(BaseInteraction):
             if src.exists():
                 shutil.copy2(src, workdir / f)
 
-        tools_dst = sandbox / "tools"
         tools_src = Path(__file__).resolve().parent
         if tools_src.is_dir():
-            shutil.copytree(tools_src, tools_dst, ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(tools_src, sandbox / "tools",
+                            ignore=shutil.ignore_patterns("__pycache__"))
 
         (workdir / "model.py").write_text(model_code)
-
         arch_dir = workdir / self.arch
         arch_dir.mkdir(exist_ok=True)
         (arch_dir / "kernels").mkdir(exist_ok=True)
+
+    # --- Output parsing ---
 
     def _extract_last_assistant(self, messages: List[Dict[str, Any]]) -> str:
         for msg in reversed(messages):
@@ -141,86 +130,72 @@ class HipKernelInteraction(BaseInteraction):
         return ""
 
     def _write_agent_output(self, sandbox: Path, code: str):
-        """Parse agent output and write model_new.py + kernel files."""
         workdir = sandbox / "agent_workdir"
         arch_dir = workdir / self.arch
         kernels_dir = arch_dir / "kernels"
-
         for f in kernels_dir.glob("*"):
-            if f.name.endswith("_hip.hip"):
-                continue
             f.unlink()
-
-        sections = self._parse_code_blocks(code)
-
-        for filename, content in sections.items():
+        for filename, content in self._parse_code_blocks(code).items():
             if filename == "model_new.py":
                 (arch_dir / filename).write_text(content)
             elif filename.endswith(".hip") or filename.endswith(".cpp"):
                 (kernels_dir / filename).write_text(content)
 
-        if "model_new.py" not in sections:
-            model_new_code = self._extract_fenced_block(code, "model_new.py")
-            if model_new_code:
-                (arch_dir / "model_new.py").write_text(model_new_code)
-
     def _parse_code_blocks(self, text: str) -> Dict[str, str]:
-        """Extract named code blocks from agent output.
-
-        Looks for patterns like:
-          **kernels/my_kernel.hip**
-          ```cpp
-          ...code...
-          ```
-        or:
-          # model_new.py
-          ```python
-          ...code...
-          ```
-        """
+        """Extract code blocks — try named headers first, then infer by content."""
         blocks = {}
-        pattern = re.compile(
-            r'(?:\*\*|#+\s*)'
-            r'(?:kernels/)?'
-            r'(\S+\.(?:hip|cpp|py))'
-            r'(?:\*\*)?'
-            r'\s*\n'
-            r'```\w*\n'
-            r'(.*?)'
-            r'\n```',
-            re.DOTALL
+        named = re.compile(
+            r'(?:\*\*|#+\s*)(?:kernels/)?(\S+\.(?:hip|cpp|py))(?:\*\*)?\s*\n```\w*\n(.*?)\n```',
+            re.DOTALL,
         )
-        for m in pattern.finditer(text):
-            filename = m.group(1).strip()
-            content = m.group(2)
-            blocks[filename] = content
+        for m in named.finditer(text):
+            blocks[m.group(1).strip()] = m.group(2)
+        if blocks:
+            return blocks
+
+        all_blocks = re.findall(r'```(\w*)\n(.*?)\n```', text, re.DOTALL)
+        py = [(l, c) for l, c in all_blocks if l in ('python', '')]
+        cpp = [(l, c) for l, c in all_blocks if l in ('cpp', 'c', 'c++', 'hip')]
+
+        for _, c in py:
+            if 'ModelNew' in c or 'hip_extension' in c:
+                blocks["model_new.py"] = c
+                break
+        for _, c in cpp:
+            if 'REGISTER_BINDING' in c or 'binding_registry' in c:
+                blocks["fused_kernel_binding.cpp"] = c
+            elif '__global__' in c or 'hip_runtime' in c:
+                blocks["fused_kernel.hip"] = c
+        if "fused_kernel_binding.cpp" not in blocks:
+            for _, c in cpp:
+                if 'torch/extension' in c or 'torch/types' in c:
+                    blocks["fused_kernel_binding.cpp"] = c
+                    break
         return blocks
 
-    def _extract_fenced_block(self, text: str, hint: str) -> str | None:
-        pattern = re.compile(r'```(?:python)?\n(.*?)\n```', re.DOTALL)
-        for m in pattern.finditer(text):
-            if hint.lower() in text[max(0, m.start()-100):m.start()].lower():
-                return m.group(1)
-        return None
+    # --- Subprocess execution ---
 
     async def _run_compile(self, sandbox: Path) -> Tuple[bool, str]:
-        cmd = ["bash", "-c", f"cd {sandbox} && PYTORCH_ROCM_ARCH={self.arch} python3 -m tools.compile --arch {self.arch}"]
-        return await self._run_cmd(cmd, self.compile_timeout)
+        return await self._run_cmd(
+            ["bash", "-c", f"cd {sandbox} && PYTORCH_ROCM_ARCH={self.arch} python3 -m tools.compile --arch {self.arch}"],
+            self.compile_timeout,
+        )
 
     async def _run_verify(self, sandbox: Path) -> Tuple[bool, str]:
-        cmd = ["bash", "-c", f"cd {sandbox} && python3 -m tools.verify --arch {self.arch}"]
-        return await self._run_cmd(cmd, self.verify_timeout)
+        return await self._run_cmd(
+            ["bash", "-c", f"cd {sandbox} && python3 -m tools.verify --arch {self.arch}"],
+            self.verify_timeout,
+        )
 
     async def _run_profile(self, sandbox: Path) -> Tuple[bool, dict]:
-        cmd = ["bash", "-c", f"cd {sandbox} && python3 -m tools.bench --arch {self.arch} --iters 10"]
-        ok, output = await self._run_cmd(cmd, self.profile_timeout)
+        ok, output = await self._run_cmd(
+            ["bash", "-c", f"cd {sandbox} && python3 -m tools.bench --arch {self.arch} --iters 10"],
+            self.profile_timeout,
+        )
         if not ok:
             return False, {}
-
         result = self._parse_profile_output(output)
-        if not result:
-            return False, {}
-        return True, result
+        return (True, result) if result else (False, {})
 
     async def _run_cmd(self, cmd: list, timeout: int) -> Tuple[bool, str]:
         try:
@@ -231,22 +206,21 @@ class HipKernelInteraction(BaseInteraction):
                 env={**os.environ, "PYTORCH_ROCM_ARCH": self.arch},
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = stdout.decode(errors="replace")
-            return proc.returncode == 0, output
+            return proc.returncode == 0, stdout.decode(errors="replace")
         except asyncio.TimeoutError:
             proc.kill()
-            return False, f"Command timed out after {timeout}s"
+            return False, f"Timed out after {timeout}s"
         except Exception as e:
             return False, str(e)
 
+    # --- Reward computation ---
+
+    _PROFILE_RE = re.compile(
+        r'Torch Baseline:\s*([\d.]+)us.*Torch Compile:\s*([\d.]+)us.*HIP Extension:\s*([\d.]+)us'
+    )
+
     def _parse_profile_output(self, output: str) -> dict | None:
-        """Parse 'Torch Baseline: X.XXXus, Torch Compile: X.XXXus, HIP Extension: X.XXXus'"""
-        pattern = re.compile(
-            r'Torch Baseline:\s*([\d.]+)us.*'
-            r'Torch Compile:\s*([\d.]+)us.*'
-            r'HIP Extension:\s*([\d.]+)us'
-        )
-        m = pattern.search(output)
+        m = self._PROFILE_RE.search(output)
         if not m:
             return None
         return {
@@ -255,38 +229,19 @@ class HipKernelInteraction(BaseInteraction):
             "hip_extension_us": float(m.group(3)),
         }
 
-    def _compute_reward(self, profile: dict) -> float:
-        baseline = profile["torch_baseline_us"]
-        compile_t = profile["torch_compile_us"]
-        hip = profile["hip_extension_us"]
-
+    @staticmethod
+    def _compute_reward(profile: dict) -> float:
+        baseline, compile_t, hip = profile["torch_baseline_us"], profile["torch_compile_us"], profile["hip_extension_us"]
         if hip < baseline * 0.95 and hip < compile_t * 0.95:
             return 3.0
         elif hip < baseline * 0.95:
             return 2.0
-        else:
-            return 1.0
+        return 1.0
 
-    def _format_profile_feedback(self, profile: dict, reward: float) -> str:
-        baseline = profile["torch_baseline_us"]
-        compile_t = profile["torch_compile_us"]
-        hip = profile["hip_extension_us"]
-
-        speedup_eager = baseline / hip if hip > 0 else 0
-        speedup_compile = compile_t / hip if hip > 0 else 0
-
-        lines = [
-            "Verification passed. Performance results:",
-            f"  Torch Baseline:  {baseline:.3f} us",
-            f"  Torch Compile:   {compile_t:.3f} us",
-            f"  HIP Extension:   {hip:.3f} us",
-            f"  Speedup vs Eager:   {speedup_eager:.2f}x",
-            f"  Speedup vs Compile: {speedup_compile:.2f}x",
-            f"  Reward: {reward:+.0f}",
-        ]
-
-        if reward < 3.0:
-            lines.append("")
-            lines.append("Try to optimize further for better performance.")
-
-        return "\n".join(lines)
+    @staticmethod
+    def _format_profile_feedback(profile: dict, reward: float) -> str:
+        b, c, h = profile["torch_baseline_us"], profile["torch_compile_us"], profile["hip_extension_us"]
+        return (
+            f"Torch Baseline: {b:.3f}us, Torch Compile: {c:.3f}us, HIP Extension: {h:.3f}us | "
+            f"Speedup: {b/h:.2f}x eager, {c/h:.2f}x compile | Reward: {reward:+.0f}"
+        )

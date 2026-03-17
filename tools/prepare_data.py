@@ -37,8 +37,24 @@ def classify_difficulty(ops: list[str]) -> str:
         return "hard"
 
 
+_ref_code_fn = None
+
+def _get_ref_code_fn(arch: str):
+    global _ref_code_fn
+    if _ref_code_fn is None:
+        import importlib.util
+        ref_path = Path(__file__).resolve().parent.parent / "agent_workdir" / arch / "ref_snippets.py"
+        spec = importlib.util.spec_from_file_location("ref_snippets", ref_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _ref_code_fn = mod.get_ref_code
+    return _ref_code_fn
+
+
 def make_chat_sample(code: str, ops: list[str], data_source: str,
                      skill_text: str, arch: str) -> dict:
+    get_ref_code = _get_ref_code_fn(arch)
+
     if isinstance(ops, list):
         ops_list = ops
     elif isinstance(ops, str) and ops.startswith("["):
@@ -49,10 +65,19 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
 
     system_msg = skill_text
 
+    ref_code = get_ref_code(ops_list, max_snippets=3)
+    ref_section = ""
+    if ref_code:
+        ref_section = (
+            f"\n\nReference HIP kernels from AMD rocm-libraries:\n"
+            f"```cpp\n{ref_code}\n```"
+        )
+
     user_msg = (
-        f"Below is the PyTorch model you need to optimize. "
-        f"Create high-performance HIP kernels for {arch}.\n\n"
+        f"Optimize this model with HIP kernels for {arch}. "
+        f"Output the 3 code files, no explanation.\n\n"
         f"```python\n{code.strip()}\n```"
+        f"{ref_section}"
     )
 
     prompt = [
@@ -81,11 +106,14 @@ def main():
     parser.add_argument("--input", required=True, help="Path to raw data.parquet")
     parser.add_argument("--output", required=True, help="Output directory for train/val parquet")
     parser.add_argument("--arch", default="gfx1201", help="Target GPU architecture")
-    parser.add_argument("--skill-path", default="agent_workdir/gfx1201/SKILL.md",
-                        help="Path to SKILL.md for system prompt")
+    parser.add_argument("--skill-path", default=None,
+                        help="Path to SKILL.md (default: agent_workdir/<arch>/SKILL.md)")
     parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation split ratio")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
+
+    if args.skill_path is None:
+        args.skill_path = f"agent_workdir/{args.arch}/SKILL.md"
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

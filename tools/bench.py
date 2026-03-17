@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Performance profiling: Eager vs torch.compile vs HIP extension.
-
-Runs from project root. Loads models from agent_workdir/.
-"""
+"""Performance profiling: Eager vs torch.compile vs HIP extension."""
 
 import argparse
 import importlib
@@ -24,14 +21,6 @@ def transform_tensors(tensors, fn):
     return tensors
 
 
-def get_prof_ctx():
-    return torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CUDA],
-        record_shapes=False,
-        with_stack=False,
-    )
-
-
 def load_module_from_file(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -44,7 +33,10 @@ def benchmark_model(model, inputs, warmup_iters, run_iters):
         for _ in range(warmup_iters):
             _ = model(*inputs)
 
-        with get_prof_ctx() as ctx:
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=False, with_stack=False,
+        ) as ctx:
             torch.cuda.synchronize()
             for _ in range(run_iters):
                 _ = model(*inputs)
@@ -57,21 +49,15 @@ def benchmark_model(model, inputs, warmup_iters, run_iters):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Profile hip_extension vs torch baseline and torch.compile."
-    )
+    parser = argparse.ArgumentParser()
     parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
-    parser.add_argument("--iters", type=int, default=10, help="Benchmark iterations")
-    parser.add_argument("--single-run", type=str,
-        help="Run once for targets: torch_baseline,torch_compile,hip_extension")
+    parser.add_argument("--iters", type=int, default=10)
     args = parser.parse_args()
 
     sys.path.insert(0, str(WORKDIR.resolve()))
 
     model_mod = load_module_from_file("model", WORKDIR / "model.py")
-    Model = model_mod.Model
-    get_inputs = model_mod.get_inputs
-    get_init_inputs = model_mod.get_init_inputs
+    Model, get_inputs, get_init_inputs = model_mod.Model, model_mod.get_inputs, model_mod.get_init_inputs
 
     model_new_mod = load_module_from_file("model_new", WORKDIR / args.arch / "model_new.py")
     ModelNew = model_new_mod.ModelNew
@@ -90,25 +76,11 @@ def main():
     torch_inputs = transform_tensors(torch_inputs, lambda x: x.cuda())
     hip_inputs = transform_tensors(torch_inputs, lambda x: x.clone())
 
-    if args.single_run:
-        targets = [x.strip() for x in args.single_run.split(",") if x.strip()]
-        with torch.no_grad():
-            if "torch_baseline" in targets:
-                _ = torch_model(*torch_inputs)
-            if "torch_compile" in targets:
-                _ = torch.compile(torch_model)(*torch_inputs)
-            if "hip_extension" in targets:
-                _ = hip_model(*hip_inputs)
-        print("[DONE] single-run completed")
-        return
-
     torch_compile_model = torch.compile(torch_model)
-    warmup_iters = 5
-    run_iters = args.iters
 
-    hip_time = benchmark_model(hip_model, hip_inputs, warmup_iters, run_iters)
-    torch_time = benchmark_model(torch_model, torch_inputs, warmup_iters, run_iters)
-    compile_time = benchmark_model(torch_compile_model, torch_inputs, warmup_iters, run_iters)
+    hip_time = benchmark_model(hip_model, hip_inputs, 5, args.iters)
+    torch_time = benchmark_model(torch_model, torch_inputs, 5, args.iters)
+    compile_time = benchmark_model(torch_compile_model, torch_inputs, 5, args.iters)
 
     print(
         f"Torch Baseline: {torch_time:.3f}us, "
