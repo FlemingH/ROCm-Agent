@@ -238,7 +238,119 @@ python3 tools/train_grpo.py \
 
 ---
 
-## 6. 与 CUDA-Agent 的差异
+## 6. 优化路线图：A → B → C 三阶段
+
+### 6.1 总览
+
+| | 阶段 A（当前） | 阶段 B（硬编码修复） | 阶段 C（自主 Agent） |
+|---|---|---|---|
+| 模式 | 单轮生成 | 固定 2 轮（生成+修复） | 模型自主 N 轮 |
+| 谁控制流程 | 无决策 | 代码硬编码 | 模型决策 |
+| 模型能力 | 从零写代码 | + 看错误修代码 | + 调试/搜索/优化 |
+| 训练框架 | TRL GRPOTrainer | 继承 GRPOTrainer | 自研训练循环 |
+| 每步时间 | ~140s | ~210s | ~700s |
+| 总训练时间 | ~52h | ~78h | ~260h |
+| 改动量 | 已完成 | ~200 行 | ~500 行新代码 |
+| Pass rate 预期 | 5-15% | 20-40% | 50-80% |
+
+### 6.2 阶段决策流程
+
+```
+阶段 A 训练完成（~52h）
+    ↓
+  评估 pass rate
+    ├─ > 15% → 写推理脚本做多轮推理（路径 1，零成本），可能够用
+    └─ < 15% → 进入阶段 B
+                  ↓
+               收集失败样本 + 实施硬编码修复 + 重新训练（~78h）
+                  ↓
+               评估 pass rate
+                  ├─ > 30% → 够用
+                  └─ < 30% → 进入阶段 C（自研训练循环，~260h）
+```
+
+### 6.3 阶段 A：单轮生成（当前）
+
+```
+[prompt] → model.generate() → [v1 代码] → evaluate() → reward → GRPO update
+```
+
+参见第 4 节训练方案。
+
+### 6.4 阶段 B：硬编码修复管线
+
+**A → B 需要收集的数据**：
+
+用阶段 A 训练后的 LoRA 模型，对数据集中每个 model.py 生成代码，记录三元组：
+
+```
+(model.py, v1 代码, 编译/验证反馈, reward)
+```
+
+- 新建 `tools/collect_trajectories.py` 实现
+- 目标：~3000 条失败样本 + ~500 条成功样本
+
+**A → B 需要修改的代码**：
+
+| 文件 | 修改内容 |
+|------|---------|
+| `tools/prepare_data.py` | 支持构造修复 prompt：70% 单轮 + 30% 修复样本 |
+| `tools/train_grpo.py` | 继承 GRPOTrainer，对 reward<0 的补全触发修复轮 |
+| 新建 `tools/collect_trajectories.py` | 收集失败/成功样本 |
+| `tools/hip_kernel_interaction.py` | 无需修改（已支持多轮） |
+
+**修复轮流程**（硬编码在 train_grpo.py 中）：
+
+```
+v1 = model.generate(prompt)
+r1, feedback, stage = evaluate(v1)
+
+if r1 >= 1.0:                        # 已通过 → 不修复
+    return r1
+elif stage in ("compile_error", "verify_error"):
+    fix_prompt = prompt + [assistant: v1] + [user: feedback]
+    v2 = model.generate(fix_prompt)   # 模型修复
+    r2, _, _ = evaluate(v2)
+    return max(r1, r2)               # 取更好的 reward
+else:
+    return r1
+```
+
+从 CUDA-Agent 保留的能力：**调试修复**（看错误 → 修代码）
+去掉的能力：自主搜索、参数调优、回滚修复（硬编码替代模型决策）
+
+### 6.5 阶段 C：自主 Agent（远期）
+
+**B → C 需要的代码**：
+
+| 文件 | 内容 |
+|------|------|
+| 新建 `tools/train_agent_rl.py` | 自研 PPO/GRPO 训练循环，支持多轮 episode（~500 行） |
+| 新建 `tools/agent_tools.py` | BashTool / EditTool / GlobTool 实现 |
+| `agent_workdir/gfx1201/SKILL.md` | 扩展为完整工作流手册（类似 CUDA-Agent 375 行版） |
+
+**Agent 循环**（类似 CUDA-Agent 的 ReAct 模式）：
+
+```
+while not done and turn < max_turns:
+    action = model.generate(conversation)        # 模型决定下一步
+    if action.type == "bash":
+        result = execute_bash(action.command)     # 编译/验证/profiling
+    elif action.type == "edit":
+        result = edit_file(action.path, action.content)
+    conversation.append(action, result)
+    done, reward = check_completion()
+
+# RL 更新：对整条轨迹计算 advantage
+loss = -advantage * sum(log_probs_all_turns)
+```
+
+**预期**：模型学会完整的开发流程（分析→实现→调试→优化），接近 CUDA-Agent 论文效果。
+**代价**：自研训练循环，放弃 TRL 便利性，训练时间 5x+。
+
+---
+
+## 7. 与 CUDA-Agent 的差异（阶段 A 视角）
 
 | | CUDA-Agent | ROCm-Agent |
 |---|---|---|
@@ -253,7 +365,7 @@ python3 tools/train_grpo.py \
 
 ---
 
-## 7. 风险与缓解
+## 8. 风险与缓解
 
 | 风险 | 缓解措施 |
 |------|----------|
@@ -265,7 +377,7 @@ python3 tools/train_grpo.py \
 
 ---
 
-## 8. 开源组件
+## 9. 开源组件
 
 | 组件 | 方案 | 许可证 |
 |------|------|--------|
