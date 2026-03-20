@@ -40,10 +40,12 @@ R9700 (单卡 34.2GB, gfx1201)
 ┌──────────────────────────────────────────────────────┐
 │  TRL GRPOTrainer                                     │
 │    1. BF16 推理：生成 HIP 内核代码 (4 completions)     │
-│    2. 并行评估 (4 workers)：                          │
-│       ├─ hipcc compile → 分级奖励 (-0.9 ~ -0.25)     │
-│       ├─ verify correctness → 奖励 0.0               │
-│       └─ profile performance → 奖励 +1 ~ +3          │
+│    2. 评估（编译并行 + GPU 串行）：                     │
+│       ├─ Phase 1: hipcc compile (CPU, 4 workers 并行) │
+│       ├─ Phase 2: verify/bench (GPU, 串行, 独立 context)│
+│       │   ├─ synchronize() → 子进程 verify → sync+cache│
+│       │   └─ HIP_VISIBLE_DEVICES=0 隔离子进程 GPU     │
+│       └─ 分级奖励 (-1.0 ~ +3.0)                      │
 │    3. GRPO 更新：LoRA 梯度回传                        │
 └──────────────────────────────────────────────────────┘
 ```
@@ -145,8 +147,8 @@ ROCm-Agent/
 
 选型理由：
 - 8B Dense BF16 比 30B MoE GPTQ 有更高的 GPU 利用率和采样多样性
-- 8B 模型能产生有效的 RL 信号（reward 从 -1.0 提升到 +0.02）
-- 训练时间 ~20 小时（vs 30B 的 5 周）
+- 8B 模型能产生有效的 RL 信号（reward 从 -1.0 提升到 +0.99）
+- 训练时间 ~65 小时（vs 30B 的 5 周）
 
 ### 4.2 奖励体系（分级）
 
@@ -172,9 +174,10 @@ ROCm-Agent/
 | 采样温度 | temperature=1.0 |
 | 学习率 | 1e-6 |
 | 训练轮次 | 2 epochs (1350 steps) |
-| 奖励并行 | 4 ProcessPoolExecutor workers |
-| 保存间隔 | 每 100 步 |
-| 预估时间 | ~20 小时 |
+| 编译并行 | 4 ProcessPoolExecutor workers (CPU) |
+| GPU eval | 串行，子进程独立 context (HIP_VISIBLE_DEVICES) |
+| 保存间隔 | 每 50 步 |
+| 预估时间 | ~65 小时（~2.7 天） |
 
 ### 4.4 训练启动命令
 
@@ -221,7 +224,7 @@ python3 tools/train_grpo.py \
   --lr 1e-6 \
   --temperature 1.0 \
   --reward-workers 4 \
-  --save-steps 100 \
+  --save-steps 50 \
   --output-dir checkpoints/grpo-8b-final \
   2>&1 | tee logs/train.log
 ```
@@ -248,21 +251,21 @@ python3 tools/train_grpo.py \
 | 谁控制流程 | 无决策 | 代码硬编码 | 模型决策 |
 | 模型能力 | 从零写代码 | + 看错误修代码 | + 调试/搜索/优化 |
 | 训练框架 | TRL GRPOTrainer | 继承 GRPOTrainer | 自研训练循环 |
-| 每步时间 | ~140s | ~210s | ~700s |
-| 总训练时间 | ~52h | ~78h | ~260h |
+| 每步时间 | ~170s | ~250s | ~700s |
+| 总训练时间 | ~65h | ~95h | ~260h |
 | 改动量 | 已完成 | ~200 行 | ~500 行新代码 |
 | Pass rate 预期 | 5-15% | 20-40% | 50-80% |
 
 ### 6.2 阶段决策流程
 
 ```
-阶段 A 训练完成（~52h）
+阶段 A 训练完成（~65h）
     ↓
   评估 pass rate
     ├─ > 15% → 写推理脚本做多轮推理（路径 1，零成本），可能够用
     └─ < 15% → 进入阶段 B
                   ↓
-               收集失败样本 + 实施硬编码修复 + 重新训练（~78h）
+               收集失败样本 + 实施硬编码修复 + 重新训练（~95h）
                   ↓
                评估 pass rate
                   ├─ > 30% → 够用
@@ -361,7 +364,7 @@ loss = -advantage * sum(log_probs_all_turns)
 | 交互模式 | 多轮迭代（最多 20 轮） | **单轮生成**（TRL GRPO 限制） |
 | 奖励体系 | 二元（-1/+1/+2/+3） | **分级（-1.0 到 +3.0，8 级）** |
 | 训练框架 | 自研训练循环 | **TRL GRPOTrainer** |
-| 训练时间 | 多卡多天 | **单卡 ~20 小时** |
+| 训练时间 | 多卡多天 | **单卡 ~65 小时** |
 
 ---
 
@@ -370,10 +373,11 @@ loss = -advantage * sum(log_probs_all_turns)
 | 风险 | 缓解措施 |
 |------|----------|
 | 8B 模型代码生成能力有限 | 注入 rocm-libraries 参考代码；分级奖励降低学习门槛 |
-| 单轮生成无法迭代修复 | 未来可展开为多轮 prompt（方向 2）或换多轮 RL 框架 |
+| 单轮生成无法迭代修复 | 未来可展开为多轮 prompt（方向 2）或自研训练循环 |
 | 采样多样性不足（低 entropy） | temperature=1.0 + reward noise ±0.1 |
 | Qwen3 thinking 消耗 tokens | 修改 chat_template 强制禁用 |
-| GPTQ 在 ROCm 上只有 TorchQuantLinear | 改用 BF16 原生模型，避开量化后端限制 |
+| hipBLASLt 多进程 GPU context 冲突 | 编译并行(CPU) + GPU eval 串行 + HIP_VISIBLE_DEVICES 隔离子进程 + sync/empty_cache |
+| bug HIP 内核越界写入主进程显存 | 子进程独立 GPU context；eval 前后 synchronize + empty_cache |
 
 ---
 
