@@ -88,6 +88,10 @@ def main():
         f"HIP Extension: {hip_time:.3f}us"
     )
 
+    del torch_model, hip_model, torch_compile_model
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
 
 if __name__ == "__main__":
     main()

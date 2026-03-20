@@ -199,11 +199,17 @@ class HipKernelInteraction:
 
     async def _run_cmd(self, cmd: list, timeout: int) -> Tuple[bool, str]:
         try:
+            env = {
+                **os.environ,
+                "PYTORCH_ROCM_ARCH": self.arch,
+                "HIP_VISIBLE_DEVICES": "0",
+                "ROCR_VISIBLE_DEVICES": "0",
+            }
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "PYTORCH_ROCM_ARCH": self.arch},
+                env=env,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             return proc.returncode == 0, stdout.decode(errors="replace")

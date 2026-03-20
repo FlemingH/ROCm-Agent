@@ -112,6 +112,8 @@ def main():
             print(f"[PASS] check {i + 1}/{num_checks}")
 
     torch.cuda.synchronize()
+    del torch_model, hip_model
+    torch.cuda.empty_cache()
     print("[PASS] verify success")
 
 

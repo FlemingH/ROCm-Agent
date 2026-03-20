@@ -8,9 +8,11 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 import os
 import random
 import re
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -18,6 +20,23 @@ import torch
 import pyarrow.parquet as pq
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+log = logging.getLogger("rocm-agent")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
+
+
+def _gpu_log(tag: str):
+    """Log GPU memory state for debugging hipBLASLt crash."""
+    alloc = torch.cuda.memory_allocated(0) / 1e9
+    reserved = torch.cuda.memory_reserved(0) / 1e9
+    peak = torch.cuda.max_memory_allocated(0) / 1e9
+    log.info(f"[GPU {tag}] alloc={alloc:.2f}GB reserved={reserved:.2f}GB peak={peak:.2f}GB")
+
 from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
 
@@ -95,16 +114,24 @@ def _gpu_eval(sandbox_path: str, arch: str) -> float:
     loop = asyncio.new_event_loop()
     try:
         sandbox = Path(sandbox_path)
+
+        log.info(f"[GPU_EVAL] verify start: {sandbox.name}")
         verify_ok, verify_msg = loop.run_until_complete(interaction._run_verify(sandbox))
         if not verify_ok:
+            log.info(f"[GPU_EVAL] verify failed: {sandbox.name}")
             return 0.0
 
+        log.info(f"[GPU_EVAL] profile start: {sandbox.name}")
         profile_ok, profile_result = loop.run_until_complete(interaction._run_profile(sandbox))
         if not profile_ok:
+            log.info(f"[GPU_EVAL] profile failed: {sandbox.name}")
             return 1.0
 
-        return interaction._compute_reward(profile_result)
-    except Exception:
+        reward = interaction._compute_reward(profile_result)
+        log.info(f"[GPU_EVAL] done: {sandbox.name} reward={reward}")
+        return reward
+    except Exception as e:
+        log.error(f"[GPU_EVAL] exception: {e}")
         return 0.0
     finally:
         loop.close()
@@ -152,12 +179,22 @@ def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
                     compile_results.append((None, -1.0, "timeout"))
 
         # Phase 2: GPU eval sequentially (verify + profile, one at a time)
+        compiled_count = sum(1 for _, _, s in compile_results if s == "compiled")
+        log.info(f"[REWARD] {compiled_count}/{len(compile_results)} compiled, starting GPU eval")
+        _gpu_log("before_eval")
+
         rewards = []
-        for sandbox_path, reward_so_far, stage in compile_results:
+        for idx, (sandbox_path, reward_so_far, stage) in enumerate(compile_results):
             if stage != "compiled" or sandbox_path is None:
                 rewards.append(reward_so_far + random.uniform(-reward_noise, reward_noise))
             else:
+                log.info(f"[REWARD] GPU eval {idx}/{len(compile_results)} start")
+                torch.cuda.synchronize()
                 gpu_reward = _gpu_eval(sandbox_path, arch)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                log.info(f"[REWARD] GPU eval {idx}/{len(compile_results)} done, reward={gpu_reward}")
+                _gpu_log(f"after_eval_{idx}")
                 rewards.append(gpu_reward + random.uniform(-reward_noise, reward_noise))
 
         return rewards
@@ -256,12 +293,23 @@ def main():
         remove_unused_columns=False,
     )
 
+    from transformers import TrainerCallback
+
+    class GPUDebugCallback(TrainerCallback):
+        def on_step_begin(self, args, state, control, **kwargs):
+            _gpu_log(f"step_{state.global_step}_begin")
+            torch.cuda.reset_peak_memory_stats()
+
+        def on_step_end(self, args, state, control, **kwargs):
+            _gpu_log(f"step_{state.global_step}_end")
+
     trainer = GRPOTrainer(
         model=model,
         reward_funcs=reward_fn,
         train_dataset=dataset,
         args=config,
         processing_class=tokenizer,
+        callbacks=[GPUDebugCallback()],
     )
 
     eff = args.batch_size * args.gradient_accumulation
