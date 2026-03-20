@@ -33,8 +33,8 @@ def load_dataset_from_parquet(path: str) -> Dataset:
     return Dataset.from_dict({"prompt": prompts})
 
 
-def _evaluate_single(args_tuple: tuple) -> float:
-    """Subprocess worker: compile/verify/profile one completion."""
+def _compile_only(args_tuple: tuple) -> tuple:
+    """Subprocess worker: parse + compile only (CPU, no GPU). Returns (sandbox_path, reward_so_far, stage)."""
     model_code, agent_output, arch, workdir_abs = args_tuple
     interaction = HipKernelInteraction({
         "arch": arch,
@@ -48,18 +48,73 @@ def _evaluate_single(args_tuple: tuple) -> float:
     try:
         iid = loop.run_until_complete(interaction.start_interaction(model_code=model_code))
         msgs = [{"role": "assistant", "content": agent_output}]
-        _, _, reward, _ = loop.run_until_complete(interaction.generate_response(iid, msgs))
-        loop.run_until_complete(interaction.finalize_interaction(iid))
-        return max(reward, -1.0)
+
+        inst = interaction._instances[iid]
+        inst["iteration"] += 1
+        sandbox = inst["sandbox"]
+
+        code = interaction._extract_last_assistant(msgs)
+        if not code:
+            loop.run_until_complete(interaction.finalize_interaction(iid))
+            return None, -1.0, "no_code"
+
+        interaction._write_agent_output(sandbox, code)
+        parsed = interaction._parse_code_blocks(code)
+        has_model_new = "model_new.py" in parsed
+        has_hip = any(k.endswith(".hip") for k in parsed)
+        has_binding = any(k.endswith("_binding.cpp") for k in parsed)
+
+        if not has_model_new and not has_hip:
+            loop.run_until_complete(interaction.finalize_interaction(iid))
+            return None, -1.0, "no_code"
+
+        compile_ok, compile_msg = loop.run_until_complete(interaction._run_compile(sandbox))
+        if not compile_ok:
+            if has_model_new and has_hip and has_binding:
+                reward = -0.25 if ("undefined" in compile_msg.lower() or "linker" in compile_msg.lower()) else -0.5
+            elif has_model_new and (has_hip or has_binding):
+                reward = -0.75
+            else:
+                reward = -0.9
+            loop.run_until_complete(interaction.finalize_interaction(iid))
+            return None, reward, "compile_error"
+
+        return str(sandbox), 0.0, "compiled"
     except Exception:
-        return -1.0
+        return None, -1.0, "error"
     finally:
         loop.close()
 
 
+def _gpu_eval(sandbox_path: str, arch: str) -> float:
+    """Sequential GPU evaluation: verify + profile. Called in main process."""
+    interaction = HipKernelInteraction({
+        "arch": arch, "workdir": "agent_workdir",
+        "verify_timeout": 30, "profile_timeout": 60,
+    })
+    loop = asyncio.new_event_loop()
+    try:
+        sandbox = Path(sandbox_path)
+        verify_ok, verify_msg = loop.run_until_complete(interaction._run_verify(sandbox))
+        if not verify_ok:
+            return 0.0
+
+        profile_ok, profile_result = loop.run_until_complete(interaction._run_profile(sandbox))
+        if not profile_ok:
+            return 1.0
+
+        return interaction._compute_reward(profile_result)
+    except Exception:
+        return 0.0
+    finally:
+        loop.close()
+        import shutil
+        shutil.rmtree(sandbox_path, ignore_errors=True)
+
+
 def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
                    reward_noise: float = 0.1):
-    """Parallel reward function using ProcessPoolExecutor."""
+    """Compile-parallel, GPU-serial reward function."""
     executor = ProcessPoolExecutor(max_workers=num_workers)
 
     def reward_fn(completions: list[str], prompts: list = None, **kwargs) -> list[float]:
@@ -84,17 +139,27 @@ def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
                 continue
             tasks.append((model_code, text, arch, workdir_abs))
 
-        futures = [executor.submit(_evaluate_single, t) if t else None for t in tasks]
-
-        rewards = []
+        # Phase 1: Compile in parallel (CPU only, no GPU)
+        futures = [executor.submit(_compile_only, t) if t else None for t in tasks]
+        compile_results = []
         for f in futures:
             if f is None:
-                rewards.append(-1.0)
+                compile_results.append((None, -1.0, "skip"))
             else:
                 try:
-                    rewards.append(f.result(timeout=180) + random.uniform(-reward_noise, reward_noise))
+                    compile_results.append(f.result(timeout=180))
                 except Exception:
-                    rewards.append(-1.0)
+                    compile_results.append((None, -1.0, "timeout"))
+
+        # Phase 2: GPU eval sequentially (verify + profile, one at a time)
+        rewards = []
+        for sandbox_path, reward_so_far, stage in compile_results:
+            if stage != "compiled" or sandbox_path is None:
+                rewards.append(reward_so_far + random.uniform(-reward_noise, reward_noise))
+            else:
+                gpu_reward = _gpu_eval(sandbox_path, arch)
+                rewards.append(gpu_reward + random.uniform(-reward_noise, reward_noise))
+
         return rewards
 
     return reward_fn
