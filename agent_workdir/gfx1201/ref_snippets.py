@@ -38,35 +38,6 @@ def _extract_struct(rel_path: str, struct_name: str, max_lines: int = 30) -> str
     return "\n".join(lines)
 
 
-def _extract_kernel(rel_path: str, kernel_name: str, max_lines: int = 40) -> str:
-    """Extract a __kernel/__global__ function by name."""
-    fp = ROCM_LIBS / rel_path
-    if not fp.exists():
-        return ""
-    text = fp.read_text(errors="replace")
-    pattern = re.compile(
-        rf"(__kernel\s+void|__global__\s+void)\s+{kernel_name}\b.*?\{{",
-        re.DOTALL,
-    )
-    m = pattern.search(text)
-    if not m:
-        return ""
-    start = m.start()
-    brace_count = 0
-    end = start
-    for i, ch in enumerate(text[start:], start):
-        if ch == "{":
-            brace_count += 1
-        elif ch == "}":
-            brace_count -= 1
-            if brace_count == 0:
-                end = i + 1
-                break
-    body = text[start:end]
-    lines = body.splitlines()[:max_lines]
-    return "\n".join(lines)
-
-
 # --- Lazy-loaded snippet cache ---
 
 _cache: dict[str, str] = {}
@@ -273,7 +244,6 @@ _OP_MAP: dict[str, str] = {
     # Unary math
     "torch.abs": "_act_abs", "torch.neg": "_act_neg",
     "torch.exp": "_act_exp", "torch.log": "_act_log",
-    "torch.sqrt": "_act_exp", "torch.rsqrt": "_act_exp",
 
     # Normalization
     "nn.BatchNorm1d": "_batchnorm", "nn.BatchNorm2d": "_batchnorm", "nn.BatchNorm3d": "_batchnorm",

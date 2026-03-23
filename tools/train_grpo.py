@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""GRPO training with compile-only reward (no GPU eval during training).
+"""GRPO training with parallel compile + GPU-isolated eval.
 
-GPU eval (verify/bench) is done separately after training to avoid
-hipBLASLt crash caused by concurrent GPU access from subprocess HIP kernels.
+Supports two generation modes:
+  1. Local generation (default): model.generate() on the training GPU.
+  2. vLLM server mode (--use-vllm): generation offloaded to an external
+     vLLM server (e.g. Docker), with automatic weight sync after each step.
 
 Usage:
+    # Single GPU, local generation:
     python3 tools/train_grpo.py --model models/Qwen3-8B --max-steps 5
+
+    # 4-GPU with Docker vLLM (GPU 0+1 vLLM, GPU 2 train, GPU 3 eval):
+    bash scripts/start-vllm.sh              # starts vLLM on GPU 0+1
+    python3 tools/train_grpo.py \\
+      --model models/Qwen3-8B --use-vllm --train-gpu 2 --eval-gpu 3 \\
+      --arch gfx1100
 """
 
 import argparse
@@ -14,7 +23,6 @@ import json
 import os
 import random
 import re
-import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -37,54 +45,31 @@ def load_dataset_from_parquet(path: str) -> Dataset:
     return Dataset.from_dict({"prompt": prompts})
 
 
-def _evaluate_compile(args_tuple: tuple) -> float:
-    """Subprocess worker: parse + compile only (CPU, no GPU)."""
-    model_code, agent_output, arch, workdir_abs = args_tuple
+def _evaluate_single(args_tuple: tuple) -> float:
+    """Subprocess worker: compile (CPU) + verify/bench (eval GPU)."""
+    model_code, agent_output, arch, workdir_abs, eval_gpu = args_tuple
     interaction = HipKernelInteraction({
         "arch": arch, "workdir": workdir_abs,
-        "compile_timeout": 90, "max_iterations": 1,
+        "compile_timeout": 90, "verify_timeout": 30,
+        "profile_timeout": 60, "max_iterations": 1,
+        "eval_gpu": eval_gpu,
     })
     loop = asyncio.new_event_loop()
     try:
         iid = loop.run_until_complete(interaction.start_interaction(model_code=model_code))
         msgs = [{"role": "assistant", "content": agent_output}]
-
-        inst = interaction._instances[iid]
-        inst["iteration"] += 1
-        sandbox = inst["sandbox"]
-
-        code = interaction._extract_last_assistant(msgs)
-        if not code:
-            return -1.0
-
-        interaction._write_agent_output(sandbox, code)
-        parsed = interaction._parse_code_blocks(code)
-        has_model_new = "model_new.py" in parsed
-        has_hip = any(k.endswith(".hip") for k in parsed)
-        has_binding = any(k.endswith("_binding.cpp") for k in parsed)
-
-        if not has_model_new and not has_hip:
-            return -1.0
-
-        compile_ok, compile_msg = loop.run_until_complete(interaction._run_compile(sandbox))
-        if not compile_ok:
-            if has_model_new and has_hip and has_binding:
-                return -0.25 if ("undefined" in compile_msg.lower() or "linker" in compile_msg.lower()) else -0.5
-            elif has_model_new and (has_hip or has_binding):
-                return -0.75
-            return -0.9
-
-        return 0.0
+        _, _, reward, _ = loop.run_until_complete(interaction.generate_response(iid, msgs))
+        loop.run_until_complete(interaction.finalize_interaction(iid))
+        return max(reward, -1.0)
     except Exception:
         return -1.0
     finally:
-        loop.run_until_complete(interaction.finalize_interaction(iid))
         loop.close()
 
 
-def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
-                   reward_noise: float = 0.1):
-    """Compile-only parallel reward function. No GPU eval."""
+def make_reward_fn(arch: str, workdir_abs: str, eval_gpu: str,
+                   num_workers: int = 4, reward_noise: float = 0.1):
+    """Parallel reward: compile on CPU, verify/bench on eval GPU."""
     executor = ProcessPoolExecutor(max_workers=num_workers)
 
     def reward_fn(completions: list[str], prompts: list = None, **kwargs) -> list[float]:
@@ -107,9 +92,9 @@ def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
             if not model_code:
                 tasks.append(None)
                 continue
-            tasks.append((model_code, text, arch, workdir_abs))
+            tasks.append((model_code, text, arch, workdir_abs, eval_gpu))
 
-        futures = [executor.submit(_evaluate_compile, t) if t else None for t in tasks]
+        futures = [executor.submit(_evaluate_single, t) if t else None for t in tasks]
 
         rewards = []
         for f in futures:
@@ -125,12 +110,12 @@ def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
     return reward_fn
 
 
-def load_model(model_path: str):
-    print(f"Loading model from {model_path}")
+def load_model(model_path: str, gpu_id: int = 0):
+    print(f"Loading model from {model_path} on GPU {gpu_id}")
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map={"": 0}, dtype=torch.bfloat16,
+        model_path, device_map={"": gpu_id}, dtype=torch.bfloat16,
     )
-    print(f"Model loaded on GPU 0: {torch.cuda.memory_allocated(0) / 1e9:.1f} GB")
+    print(f"Model loaded on GPU {gpu_id}: {torch.cuda.memory_allocated(gpu_id) / 1e9:.1f} GB")
     return model
 
 
@@ -150,7 +135,7 @@ def apply_lora(model, r: int = 8, alpha: int = 16, dropout: float = 0.05):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GRPO training (compile-only reward)")
+    p = argparse.ArgumentParser(description="GRPO training with GPU-isolated eval")
     p.add_argument("--model", required=True)
     p.add_argument("--train-data", default="data/rocm_agent_ops/train.parquet")
     p.add_argument("--output-dir", default="checkpoints/grpo")
@@ -168,6 +153,14 @@ def parse_args():
     p.add_argument("--arch", default="gfx1201")
     p.add_argument("--reward-workers", type=int, default=4)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--eval-gpu", default=None,
+                   help="GPU id for verify/bench (e.g. '3'). If unset, uses same GPU as training.")
+    p.add_argument("--use-vllm", action="store_true",
+                   help="Use external vLLM server for generation (start with scripts/start-vllm.sh)")
+    p.add_argument("--train-gpu", type=int, default=0,
+                   help="GPU id for training model (default 0; set to 2 for 4-GPU vLLM setup)")
+    p.add_argument("--vllm-port", type=int, default=8000,
+                   help="vLLM server port (default 8000)")
     return p.parse_args()
 
 
@@ -176,38 +169,39 @@ def main():
     os.chdir(PROJECT_ROOT)
     workdir_abs = str(PROJECT_ROOT / "agent_workdir")
 
+    eval_gpu = args.eval_gpu if args.eval_gpu else str(args.train_gpu)
+
     dataset = load_dataset_from_parquet(args.train_data)
     print(f"Loaded {len(dataset)} training samples")
 
-    model = load_model(args.model)
-    model.generation_config.temperature = args.temperature
-    model.generation_config.top_k = 0
-    model.generation_config.top_p = 1.0
-    model.generation_config.do_sample = True
+    model = load_model(args.model, gpu_id=args.train_gpu)
+    if not args.use_vllm:
+        model.generation_config.temperature = args.temperature
+        model.generation_config.top_k = 0
+        model.generation_config.top_p = 1.0
+        model.generation_config.do_sample = True
     model = apply_lora(model, r=args.lora_r, alpha=args.lora_alpha)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    reward_fn = make_reward_fn(args.arch, workdir_abs, args.reward_workers)
+    reward_fn = make_reward_fn(args.arch, workdir_abs, eval_gpu, args.reward_workers)
 
     gen_batch = max(args.batch_size, args.num_generations)
     gen_batch -= gen_batch % args.num_generations
 
-    config = GRPOConfig(
+    grpo_kwargs = dict(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
         max_steps=args.max_steps,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation,
         num_generations=args.num_generations,
-        generation_batch_size=gen_batch,
         max_completion_length=args.max_completion_length,
         learning_rate=args.lr,
         temperature=args.temperature,
         bf16=True,
-        use_vllm=False,
         gradient_checkpointing=True,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
@@ -215,6 +209,21 @@ def main():
         report_to="none",
         remove_unused_columns=False,
     )
+
+    if args.use_vllm:
+        grpo_kwargs.update(
+            use_vllm=True,
+            vllm_server_port=args.vllm_port,
+            vllm_gpu_memory_utilization=0.9,
+        )
+        print(f"vLLM server mode: port={args.vllm_port}")
+    else:
+        grpo_kwargs.update(
+            use_vllm=False,
+            generation_batch_size=gen_batch,
+        )
+
+    config = GRPOConfig(**grpo_kwargs)
 
     trainer = GRPOTrainer(
         model=model,
@@ -227,11 +236,12 @@ def main():
     eff = args.batch_size * args.gradient_accumulation
     steps = len(dataset) // eff
     total = steps * args.epochs if args.max_steps < 0 else args.max_steps
-    print(f"GRPO: model={args.model}, arch={args.arch}")
+    mode = "vLLM server" if args.use_vllm else "local generation"
+    print(f"GRPO: model={args.model}, arch={args.arch}, mode={mode}")
     print(f"  epochs={args.epochs}, steps/epoch={steps}, total={total}")
     print(f"  batch={args.batch_size}, grad_accum={args.gradient_accumulation}, num_gen={args.num_generations}")
     print(f"  max_len={args.max_completion_length}, temp={args.temperature}, workers={args.reward_workers}")
-    print(f"  reward=compile-only (no GPU eval)")
+    print(f"  train_gpu={args.train_gpu}, eval_gpu={eval_gpu}")
 
     trainer.train()
     trainer.save_model(args.output_dir)

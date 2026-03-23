@@ -32,6 +32,7 @@ class HipKernelInteraction:
         self.verify_timeout = config.get("verify_timeout", 30)
         self.profile_timeout = config.get("profile_timeout", 60)
         self.max_iterations = config.get("max_iterations", 20)
+        self.eval_gpu = config.get("eval_gpu", None)
         self._instances: Dict[str, dict] = {}
 
     async def start_interaction(self, instance_id: Optional[str] = None,
@@ -184,22 +185,25 @@ class HipKernelInteraction:
     async def _run_verify(self, sandbox: Path) -> Tuple[bool, str]:
         return await self._run_cmd(
             ["bash", "-c", f"cd {sandbox} && python3 -m tools.verify --arch {self.arch}"],
-            self.verify_timeout,
+            self.verify_timeout, use_eval_gpu=True,
         )
 
     async def _run_profile(self, sandbox: Path) -> Tuple[bool, dict]:
         ok, output = await self._run_cmd(
             ["bash", "-c", f"cd {sandbox} && python3 -m tools.bench --arch {self.arch} --iters 10"],
-            self.profile_timeout,
+            self.profile_timeout, use_eval_gpu=True,
         )
         if not ok:
             return False, {}
         result = self._parse_profile_output(output)
         return (True, result) if result else (False, {})
 
-    async def _run_cmd(self, cmd: list, timeout: int) -> Tuple[bool, str]:
+    async def _run_cmd(self, cmd: list, timeout: int, use_eval_gpu: bool = False) -> Tuple[bool, str]:
         try:
             env = {**os.environ, "PYTORCH_ROCM_ARCH": self.arch}
+            if use_eval_gpu and self.eval_gpu is not None:
+                env["HIP_VISIBLE_DEVICES"] = str(self.eval_gpu)
+                env["ROCR_VISIBLE_DEVICES"] = str(self.eval_gpu)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
