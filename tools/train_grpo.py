@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""GRPO training with parallel HIP kernel evaluation.
+"""GRPO training with compile-only reward (no GPU eval during training).
+
+GPU eval (verify/bench) is done separately after training to avoid
+hipBLASLt crash caused by concurrent GPU access from subprocess HIP kernels.
 
 Usage:
     python3 tools/train_grpo.py --model models/Qwen3-8B --max-steps 5
@@ -8,11 +11,10 @@ Usage:
 import argparse
 import asyncio
 import json
-import logging
 import os
 import random
 import re
-import sys
+import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -20,23 +22,6 @@ import torch
 import pyarrow.parquet as pq
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-log = logging.getLogger("rocm-agent")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stderr,
-)
-
-
-def _gpu_log(tag: str):
-    """Log GPU memory state for debugging hipBLASLt crash."""
-    alloc = torch.cuda.memory_allocated(0) / 1e9
-    reserved = torch.cuda.memory_reserved(0) / 1e9
-    peak = torch.cuda.max_memory_allocated(0) / 1e9
-    log.info(f"[GPU {tag}] alloc={alloc:.2f}GB reserved={reserved:.2f}GB peak={peak:.2f}GB")
-
 from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
 
@@ -52,16 +37,12 @@ def load_dataset_from_parquet(path: str) -> Dataset:
     return Dataset.from_dict({"prompt": prompts})
 
 
-def _compile_only(args_tuple: tuple) -> tuple:
-    """Subprocess worker: parse + compile only (CPU, no GPU). Returns (sandbox_path, reward_so_far, stage)."""
+def _evaluate_compile(args_tuple: tuple) -> float:
+    """Subprocess worker: parse + compile only (CPU, no GPU)."""
     model_code, agent_output, arch, workdir_abs = args_tuple
     interaction = HipKernelInteraction({
-        "arch": arch,
-        "workdir": workdir_abs,
-        "compile_timeout": 90,
-        "verify_timeout": 30,
-        "profile_timeout": 60,
-        "max_iterations": 1,
+        "arch": arch, "workdir": workdir_abs,
+        "compile_timeout": 90, "max_iterations": 1,
     })
     loop = asyncio.new_event_loop()
     try:
@@ -74,8 +55,7 @@ def _compile_only(args_tuple: tuple) -> tuple:
 
         code = interaction._extract_last_assistant(msgs)
         if not code:
-            loop.run_until_complete(interaction.finalize_interaction(iid))
-            return None, -1.0, "no_code"
+            return -1.0
 
         interaction._write_agent_output(sandbox, code)
         parsed = interaction._parse_code_blocks(code)
@@ -84,64 +64,27 @@ def _compile_only(args_tuple: tuple) -> tuple:
         has_binding = any(k.endswith("_binding.cpp") for k in parsed)
 
         if not has_model_new and not has_hip:
-            loop.run_until_complete(interaction.finalize_interaction(iid))
-            return None, -1.0, "no_code"
+            return -1.0
 
         compile_ok, compile_msg = loop.run_until_complete(interaction._run_compile(sandbox))
         if not compile_ok:
             if has_model_new and has_hip and has_binding:
-                reward = -0.25 if ("undefined" in compile_msg.lower() or "linker" in compile_msg.lower()) else -0.5
+                return -0.25 if ("undefined" in compile_msg.lower() or "linker" in compile_msg.lower()) else -0.5
             elif has_model_new and (has_hip or has_binding):
-                reward = -0.75
-            else:
-                reward = -0.9
-            loop.run_until_complete(interaction.finalize_interaction(iid))
-            return None, reward, "compile_error"
+                return -0.75
+            return -0.9
 
-        return str(sandbox), 0.0, "compiled"
-    except Exception:
-        return None, -1.0, "error"
-    finally:
-        loop.close()
-
-
-def _gpu_eval(sandbox_path: str, arch: str) -> float:
-    """Sequential GPU evaluation: verify + profile. Called in main process."""
-    interaction = HipKernelInteraction({
-        "arch": arch, "workdir": "agent_workdir",
-        "verify_timeout": 30, "profile_timeout": 60,
-    })
-    loop = asyncio.new_event_loop()
-    try:
-        sandbox = Path(sandbox_path)
-
-        log.info(f"[GPU_EVAL] verify start: {sandbox.name}")
-        verify_ok, verify_msg = loop.run_until_complete(interaction._run_verify(sandbox))
-        if not verify_ok:
-            log.info(f"[GPU_EVAL] verify failed: {sandbox.name}")
-            return 0.0
-
-        log.info(f"[GPU_EVAL] profile start: {sandbox.name}")
-        profile_ok, profile_result = loop.run_until_complete(interaction._run_profile(sandbox))
-        if not profile_ok:
-            log.info(f"[GPU_EVAL] profile failed: {sandbox.name}")
-            return 1.0
-
-        reward = interaction._compute_reward(profile_result)
-        log.info(f"[GPU_EVAL] done: {sandbox.name} reward={reward}")
-        return reward
-    except Exception as e:
-        log.error(f"[GPU_EVAL] exception: {e}")
         return 0.0
+    except Exception:
+        return -1.0
     finally:
+        loop.run_until_complete(interaction.finalize_interaction(iid))
         loop.close()
-        import shutil
-        shutil.rmtree(sandbox_path, ignore_errors=True)
 
 
 def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
                    reward_noise: float = 0.1):
-    """Compile-parallel, GPU-serial reward function."""
+    """Compile-only parallel reward function. No GPU eval."""
     executor = ProcessPoolExecutor(max_workers=num_workers)
 
     def reward_fn(completions: list[str], prompts: list = None, **kwargs) -> list[float]:
@@ -166,37 +109,17 @@ def make_reward_fn(arch: str, workdir_abs: str, num_workers: int = 4,
                 continue
             tasks.append((model_code, text, arch, workdir_abs))
 
-        # Phase 1: Compile in parallel (CPU only, no GPU)
-        futures = [executor.submit(_compile_only, t) if t else None for t in tasks]
-        compile_results = []
-        for f in futures:
-            if f is None:
-                compile_results.append((None, -1.0, "skip"))
-            else:
-                try:
-                    compile_results.append(f.result(timeout=180))
-                except Exception:
-                    compile_results.append((None, -1.0, "timeout"))
-
-        # Phase 2: GPU eval sequentially (verify + profile, one at a time)
-        compiled_count = sum(1 for _, _, s in compile_results if s == "compiled")
-        log.info(f"[REWARD] {compiled_count}/{len(compile_results)} compiled, starting GPU eval")
-        _gpu_log("before_eval")
+        futures = [executor.submit(_evaluate_compile, t) if t else None for t in tasks]
 
         rewards = []
-        for idx, (sandbox_path, reward_so_far, stage) in enumerate(compile_results):
-            if stage != "compiled" or sandbox_path is None:
-                rewards.append(reward_so_far + random.uniform(-reward_noise, reward_noise))
+        for f in futures:
+            if f is None:
+                rewards.append(-1.0)
             else:
-                log.info(f"[REWARD] GPU eval {idx}/{len(compile_results)} start")
-                torch.cuda.synchronize()
-                gpu_reward = _gpu_eval(sandbox_path, arch)
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                log.info(f"[REWARD] GPU eval {idx}/{len(compile_results)} done, reward={gpu_reward}")
-                _gpu_log(f"after_eval_{idx}")
-                rewards.append(gpu_reward + random.uniform(-reward_noise, reward_noise))
-
+                try:
+                    rewards.append(f.result(timeout=180) + random.uniform(-reward_noise, reward_noise))
+                except Exception:
+                    rewards.append(-1.0)
         return rewards
 
     return reward_fn
@@ -227,7 +150,7 @@ def apply_lora(model, r: int = 8, alpha: int = 16, dropout: float = 0.05):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GRPO training with parallel HIP eval")
+    p = argparse.ArgumentParser(description="GRPO training (compile-only reward)")
     p.add_argument("--model", required=True)
     p.add_argument("--train-data", default="data/rocm_agent_ops/train.parquet")
     p.add_argument("--output-dir", default="checkpoints/grpo")
@@ -238,7 +161,7 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-6)
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--max-steps", type=int, default=-1)
-    p.add_argument("--save-steps", type=int, default=100)
+    p.add_argument("--save-steps", type=int, default=50)
     p.add_argument("--logging-steps", type=int, default=1)
     p.add_argument("--lora-r", type=int, default=8)
     p.add_argument("--lora-alpha", type=int, default=16)
@@ -293,23 +216,12 @@ def main():
         remove_unused_columns=False,
     )
 
-    from transformers import TrainerCallback
-
-    class GPUDebugCallback(TrainerCallback):
-        def on_step_begin(self, args, state, control, **kwargs):
-            _gpu_log(f"step_{state.global_step}_begin")
-            torch.cuda.reset_peak_memory_stats()
-
-        def on_step_end(self, args, state, control, **kwargs):
-            _gpu_log(f"step_{state.global_step}_end")
-
     trainer = GRPOTrainer(
         model=model,
         reward_funcs=reward_fn,
         train_dataset=dataset,
         args=config,
         processing_class=tokenizer,
-        callbacks=[GPUDebugCallback()],
     )
 
     eff = args.batch_size * args.gradient_accumulation
@@ -319,6 +231,7 @@ def main():
     print(f"  epochs={args.epochs}, steps/epoch={steps}, total={total}")
     print(f"  batch={args.batch_size}, grad_accum={args.gradient_accumulation}, num_gen={args.num_generations}")
     print(f"  max_len={args.max_completion_length}, temp={args.temperature}, workers={args.reward_workers}")
+    print(f"  reward=compile-only (no GPU eval)")
 
     trainer.train()
     trainer.save_model(args.output_dir)
