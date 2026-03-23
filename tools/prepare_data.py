@@ -63,8 +63,6 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
         ops_list = [ops] if ops else []
     difficulty = classify_difficulty(ops_list)
 
-    system_msg = skill_text
-
     ref_code = get_ref_code(ops_list, max_snippets=3)
     ref_section = ""
     if ref_code:
@@ -81,7 +79,7 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
     )
 
     prompt = [
-        {"role": "system", "content": system_msg},
+        {"role": "system", "content": skill_text},
         {"role": "user", "content": user_msg},
     ]
 

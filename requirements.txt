@@ -1,5 +1,5 @@
 # ROCm-Agent dependencies for conda env "ra"
-# Single-machine: R9700 (gfx1201, 32GB GDDR7)
+# Target: 4× W7800 (gfx1100) or R9700 (gfx1201)
 # Platform: ROCm 7.2 / Ubuntu 24.04 / Python 3.12
 #
 # PyTorch ROCm (pre-installed in conda env, do NOT pip install from PyPI):
@@ -12,11 +12,9 @@
 trl>=0.29.0
 accelerate>=1.13.0
 
-# Model & quantization
+# Model & fine-tuning
 transformers>=4.56.2,<5.0
 peft>=0.18.0
-gptqmodel>=5.7.0
-optimum>=2.1.0
 safetensors
 tokenizers
 sentencepiece
