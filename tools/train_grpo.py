@@ -213,8 +213,8 @@ def main():
     if args.use_vllm:
         grpo_kwargs.update(
             use_vllm=True,
+            vllm_mode="server",
             vllm_server_port=args.vllm_port,
-            vllm_gpu_memory_utilization=0.9,
         )
         print(f"vLLM server mode: port={args.vllm_port}")
     else:
