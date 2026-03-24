@@ -1,3 +1,13 @@
 FROM rocm/vllm-dev:rocm7.2_navi_ubuntu24.04_py3.12_pytorch_2.9_vllm_0.14.0rc0
 
 RUN pip install --no-cache-dir "trl>=0.29.0"
+
+RUN { echo '#!/usr/bin/env python3'; \
+      echo 'import multiprocessing'; \
+      echo 'if __name__ == "__main__":'; \
+      echo '    multiprocessing.set_start_method("spawn")'; \
+      echo '    from trl import TrlParser'; \
+      echo '    from trl.scripts.vllm_serve import ScriptArguments, main'; \
+      echo '    (script_args,) = TrlParser((ScriptArguments,)).parse_args_and_config()'; \
+      echo '    main(script_args)'; \
+    } > /usr/local/bin/trl-vllm-serve && chmod +x /usr/local/bin/trl-vllm-serve

@@ -32,12 +32,13 @@ docker run -d --name "$CONTAINER" \
     --device /dev/kfd --device /dev/dri \
     --group-add video \
     --shm-size 16g \
-    -e ROCR_VISIBLE_DEVICES=0,1 \
+    -e HIP_VISIBLE_DEVICES=0,1 \
     -e HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+    -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
     -v "$(pwd)/$MODEL:/model" \
     -p "${PORT}:${PORT}" \
     "$IMAGE" \
-    trl vllm-serve \
+    trl-vllm-serve \
         --model /model \
         --tensor-parallel-size "$TP" \
         --dtype bfloat16 \
