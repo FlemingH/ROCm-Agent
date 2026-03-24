@@ -1,5 +1,5 @@
 # ROCm-Agent dependencies for conda env "ra"
-# Target: 4× W7800 (gfx1100) or R9700 (gfx1201)
+# Target: 4× W7800 (gfx1100)
 # Platform: ROCm 7.2 / Ubuntu 24.04 / Python 3.12
 #
 # PyTorch ROCm (pre-installed in conda env, do NOT pip install from PyPI):
@@ -7,6 +7,11 @@
 #   torchvision==0.24.0+rocm7.2.0
 #   torchaudio==2.9.1
 #   triton==3.5.1+rocm7.2.0
+#
+# vLLM ROCm (需手动安装，详见设计文档):
+#   vllm==0.14.0rc1+rocm7.2
+#   amdsmi (pip install /opt/rocm-7.2.0/share/amd_smi/)
+#   flash-attn==2.8.3 (pip install from https://wheels.vllm.ai/rocm/flash-attn/)
 
 # RL training framework
 trl>=0.29.0
@@ -27,3 +32,13 @@ pyarrow
 # Build tools (HIP compilation)
 ninja
 cmake
+
+# vLLM runtime dependencies (host side)
+cbor2
+cachetools
+ijson
+watchfiles
+xgrammar
+numba
+llguidance
+fastsafetensors

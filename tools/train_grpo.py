@@ -4,14 +4,14 @@
 Supports two generation modes:
   1. Local generation (default): model.generate() on the training GPU.
   2. vLLM server mode (--use-vllm): generation offloaded to an external
-     vLLM server (e.g. Docker), with automatic weight sync after each step.
+     vLLM server, with automatic weight sync after each step.
 
 Usage:
     # Single GPU, local generation:
     python3 tools/train_grpo.py --model models/Qwen3-8B --max-steps 5
 
-    # 4-GPU with Docker vLLM (GPU 0+1 vLLM, GPU 2 train, GPU 3 eval):
-    bash scripts/start-vllm.sh              # starts vLLM on GPU 0+1
+    # 4-GPU with vLLM (GPU 0+1 vLLM, GPU 2 train, GPU 3 eval):
+    python3 tools/vllm_serve.py ...          # starts vLLM on GPU 0+1
     python3 tools/train_grpo.py \\
       --model models/Qwen3-8B --use-vllm --train-gpu 2 --eval-gpu 3 \\
       --arch gfx1100

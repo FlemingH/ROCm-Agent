@@ -10,7 +10,7 @@
 
 | 架构 | 系列 | 显卡 | 显存 | 状态 |
 |------|------|------|------|------|
-| gfx1100 | RDNA 3 | 4× W7800 | 32 GB 每卡 | **4 卡 Docker vLLM** |
+| gfx1100 | RDNA 3 | 4× W7800 | 32 GB 每卡 | **4 卡 vLLM TP=2** |
 
 ### 1.2 4 卡显存分配（Qwen3-8B BF16）
 
@@ -27,8 +27,8 @@
 
 ```
                     ┌────────────────────────────────────┐
-                    │  Docker Container (GPU 0 + 1)      │
-                    │  trl vllm-serve, TP = 2            │
+                    │  Host vLLM Server (GPU 0 + 1)      │
+                    │  tools/vllm_serve.py, TP = 2       │
                     │  PagedAttention + Continuous Batch  │
   ┌── HTTP req ───→ │  BF16 autoregressive decoding      │
   │                 └───────────────┬────────────────────┘
@@ -87,8 +87,7 @@ ROCm-Agent/
 │   ├── binding.cpp / binding_registry.h
 │   └── gfx1100/                        # RDNA 3：SKILL.md + ref_snippets.py
 │
-├── docker/Dockerfile.vllm              # AMD vLLM + TRL Docker 镜像（含 spawn 修复）
-├── scripts/start-vllm.sh              # 启动 Docker vLLM 服务（HIP_VISIBLE_DEVICES）
+│   ├── vllm_serve.py                  #   vLLM 推理服务启动器（spawn 修复）
 │
 ├── rocm-libraries/                     # 7.2.0 源码（.gitignore）
 ├── models/ / data/ / checkpoints/ / logs/
@@ -179,18 +178,35 @@ python3 tools/prepare_data.py \
   --input data/CUDA-Agent-Ops-6K/data.parquet \
   --output data/rocm_agent_ops/ --arch gfx1100
 
-# ═══ 4 卡 Docker vLLM 训练（推荐）═══
+# ═══ 安装 vLLM（首次）═══
 
-# 拉取基础镜像（首次）
-docker pull rocm/vllm-dev:rocm7.2_navi_ubuntu24.04_py3.12_pytorch_2.9_vllm_0.14.0rc0
+# 1. 安装 vllm ROCm 预编译包
+pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
 
-# 启动 vLLM（自动构建 rocm-agent-vllm 镜像，GPU 0+1）
-# Dockerfile.vllm 在基础镜像上添加 trl 和 trl-vllm-serve wrapper
-# wrapper 通过 multiprocessing.set_start_method("spawn") 解决
-# ROCm 下 fork 子进程无法重新初始化 CUDA 的问题
-# start-vllm.sh 使用 HIP_VISIBLE_DEVICES（Ray 要求）替代 ROCR_VISIBLE_DEVICES
-bash scripts/start-vllm.sh models/Qwen3-8B 2
+# 2. 安装 amdsmi（ROCm 平台检测）
+pip install /opt/rocm-7.2.0/share/amd_smi/
 
+# 3. 安装 flash-attn（ROCm 版）
+pip install https://wheels.vllm.ai/rocm/bcf2be96120005e9aea171927f85055a6a5c0cf6/flash_attn-2.8.3-cp312-cp312-manylinux_2_35_x86_64.whl
+
+# 4. 安装 vLLM 运行时依赖
+pip install -r requirements.txt
+
+# ═══ 4 卡 vLLM 训练 ═══
+
+# 终端 1：启动 vLLM 推理服务（GPU 0+1）
+HIP_VISIBLE_DEVICES=0,1 HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn PYTHONUNBUFFERED=1 \
+python3 tools/vllm_serve.py \
+  --model models/Qwen3-8B \
+  --tensor-parallel-size 2 \
+  --dtype bfloat16 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 2048 \
+  --enforce-eager \
+  --port 8000
+
+# 终端 2：启动 GRPO 训练（GPU 2 训练，GPU 3 评估）
 python3 tools/train_grpo.py \
   --model models/Qwen3-8B \
   --use-vllm --train-gpu 2 --eval-gpu 3 \
@@ -200,7 +216,6 @@ python3 tools/train_grpo.py \
   --reward-workers 4 --save-steps 50 \
   --output-dir checkpoints/grpo-8b-vllm \
   2>&1 | tee logs/train-vllm.log
-docker stop rocm-agent-vllm && docker rm rocm-agent-vllm
 ```
 
 ---
@@ -223,6 +238,6 @@ docker stop rocm-agent-vllm && docker rm rocm-agent-vllm
 | 基座模型 | Qwen3-8B (BF16) | Qwen License |
 | RL 框架 | TRL GRPOTrainer | Apache 2.0 |
 | 微调 | PEFT LoRA | Apache 2.0 |
-| 推理加速 | vLLM Docker (rocm/vllm-dev:rocm7.2\_navi, 0.14.0rc0) | Apache 2.0 |
+| 推理加速 | vLLM 0.14.0rc1 (ROCm 7.2, 主机模式) | Apache 2.0 |
 | 参考代码 | rocm-libraries 7.2.0 | MIT |
 | 数据集 | CUDA-Agent-Ops-6K | — |
