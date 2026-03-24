@@ -10,10 +10,7 @@
 
 | 架构 | 系列 | 显卡 | 显存 | 状态 |
 |------|------|------|------|------|
-| gfx1100 | RDNA 3 | 4× W7800 | 32 GB 每卡 | **推荐（4 卡 Docker vLLM）** |
-| gfx1201 | RDNA 4 | R9700 | 34.2 GB | 备选（单卡，需禁用 hipBLASLt） |
-
-通过 `--arch` 参数和 `agent_workdir/<arch>/` 目录自动适配不同架构。
+| gfx1100 | RDNA 3 | 4× W7800 | 32 GB 每卡 | **4 卡 Docker vLLM** |
 
 ### 1.2 4 卡显存分配（Qwen3-8B BF16）
 
@@ -63,16 +60,16 @@
               └──────────────────────────┘
 ```
 
-**单步时序**（4 卡 vLLM vs 单卡）：
+**单步时序**（4 卡流水线）：
 
-| 阶段 | 单卡串行 | 4 卡流水线 |
-|------|---------|-----------|
-| LLM 生成 | ~120s (66%) | ~25-35s (vLLM TP=2) |
-| hipcc 编译 | ~40s (22%) | 与生成并行 |
-| GPU eval | ~14s (8%) | 与下轮生成并行 |
-| 训练 | ~9s (5%) | 与下轮生成并行 |
-| **单步总时间** | **~135s** | **~40-50s** |
-| **完整训练** | **~50h** | **~15-19h** |
+| 阶段 | 耗时 | 说明 |
+|------|------|------|
+| LLM 生成 | ~25-35s | vLLM TP=2, GPU 0+1 |
+| hipcc 编译 | 与生成并行 | 4× CPU workers |
+| GPU eval | 与下轮生成并行 | GPU 3 物理隔离 |
+| 训练 | 与下轮生成并行 | GPU 2 |
+| **单步总时间** | **~40-50s** | |
+| **完整训练** | **~15-19h** | |
 
 ---
 
@@ -88,11 +85,10 @@ ROCm-Agent/
 │
 ├── agent_workdir/
 │   ├── binding.cpp / binding_registry.h
-│   ├── gfx1100/                        # RDNA 3：SKILL.md + ref_snippets.py
-│   └── gfx1201/                        # RDNA 4：SKILL.md + ref_snippets.py
+│   └── gfx1100/                        # RDNA 3：SKILL.md + ref_snippets.py
 │
-├── docker/Dockerfile.vllm              # AMD vLLM + TRL Docker 镜像
-├── scripts/start-vllm.sh              # 启动 Docker vLLM 服务
+├── docker/Dockerfile.vllm              # AMD vLLM + TRL Docker 镜像（含 spawn 修复）
+├── scripts/start-vllm.sh              # 启动 Docker vLLM 服务（HIP_VISIBLE_DEVICES）
 │
 ├── rocm-libraries/                     # 7.2.0 源码（.gitignore）
 ├── models/ / data/ / checkpoints/ / logs/
@@ -134,7 +130,7 @@ ROCm-Agent/
 | 学习率 | 1e-6 |
 | 轮次 | 2 epochs (1350 steps) |
 | 编译并行 | 4 CPU workers |
-| 预估时间 | 4 卡 ~15-19h / 单卡 ~50h |
+| 预估时间 | ~15-19h |
 
 ### 4.4 提示词架构
 
@@ -185,7 +181,16 @@ python3 tools/prepare_data.py \
 
 # ═══ 4 卡 Docker vLLM 训练（推荐）═══
 
-bash scripts/start-vllm.sh models/Qwen3-8B 2    # Docker vLLM on GPU 0+1
+# 拉取基础镜像（首次）
+docker pull rocm/vllm-dev:rocm7.2_navi_ubuntu24.04_py3.12_pytorch_2.9_vllm_0.14.0rc0
+
+# 启动 vLLM（自动构建 rocm-agent-vllm 镜像，GPU 0+1）
+# Dockerfile.vllm 在基础镜像上添加 trl 和 trl-vllm-serve wrapper
+# wrapper 通过 multiprocessing.set_start_method("spawn") 解决
+# ROCm 下 fork 子进程无法重新初始化 CUDA 的问题
+# start-vllm.sh 使用 HIP_VISIBLE_DEVICES（Ray 要求）替代 ROCR_VISIBLE_DEVICES
+bash scripts/start-vllm.sh models/Qwen3-8B 2
+
 python3 tools/train_grpo.py \
   --model models/Qwen3-8B \
   --use-vllm --train-gpu 2 --eval-gpu 3 \
@@ -196,18 +201,6 @@ python3 tools/train_grpo.py \
   --output-dir checkpoints/grpo-8b-vllm \
   2>&1 | tee logs/train-vllm.log
 docker stop rocm-agent-vllm && docker rm rocm-agent-vllm
-
-# ═══ 单卡训练（R9700 gfx1201 备选）═══
-
-sudo mv /opt/rocm-7.2.0/lib/libhipblaslt.so.1 /opt/rocm-7.2.0/lib/libhipblaslt.so.1.bak
-python3 tools/train_grpo.py \
-  --model models/Qwen3-8B --arch gfx1201 \
-  --epochs 2 --batch-size 2 --num-generations 4 \
-  --gradient-accumulation 4 --lr 1e-6 --temperature 1.0 \
-  --reward-workers 4 --save-steps 50 \
-  --output-dir checkpoints/grpo-8b-final \
-  2>&1 | tee logs/train.log
-sudo mv /opt/rocm-7.2.0/lib/libhipblaslt.so.1.bak /opt/rocm-7.2.0/lib/libhipblaslt.so.1
 ```
 
 ---
@@ -227,11 +220,11 @@ sudo mv /opt/rocm-7.2.0/lib/libhipblaslt.so.1.bak /opt/rocm-7.2.0/lib/libhipblas
 
 | 风险 | 缓解 |
 |------|------|
-| 生成瓶颈（单卡 66%） | Docker vLLM TP=2 加速 3-5× |
-| hipBLASLt gfx1201 崩溃 | 单卡禁用 libhipblaslt.so；gfx1100 无此 bug |
+| 生成瓶颈 | Docker vLLM TP=2 加速 3-5× |
 | HIP 内核越界写入训练 GPU | --eval-gpu 物理隔离到 GPU 3 |
 | gfx1100 无 Flash Attention | --enforce-eager 禁用 CUDA Graph |
-| Docker 与主机 GPU 冲突 | ROCR_VISIBLE_DEVICES 隔离 |
+| Docker 与主机 GPU 冲突 | HIP_VISIBLE_DEVICES 隔离（Ray 要求，替代 ROCR_VISIBLE_DEVICES） |
+| trl vllm-serve fork 崩溃 | trl-vllm-serve wrapper：spawn + \_\_main\_\_ guard |
 | 8B 模型代码能力有限 | 注入 rocm-libraries 参考代码 + 分级奖励 |
 | 采样多样性不足 | temperature=1.0 + reward noise ±0.1 |
 
@@ -244,6 +237,6 @@ sudo mv /opt/rocm-7.2.0/lib/libhipblaslt.so.1.bak /opt/rocm-7.2.0/lib/libhipblas
 | 基座模型 | Qwen3-8B (BF16) | Qwen License |
 | RL 框架 | TRL GRPOTrainer | Apache 2.0 |
 | 微调 | PEFT LoRA | Apache 2.0 |
-| 推理加速 | vLLM Docker (rocm/vllm-dev navi) | Apache 2.0 |
+| 推理加速 | vLLM Docker (rocm/vllm-dev:rocm7.2\_navi, 0.14.0rc0) | Apache 2.0 |
 | 参考代码 | rocm-libraries 7.2.0 | MIT |
 | 数据集 | CUDA-Agent-Ops-6K | — |
