@@ -216,21 +216,7 @@ docker stop rocm-agent-vllm && docker rm rocm-agent-vllm
 
 ---
 
-## 7. 风险与缓解
-
-| 风险 | 缓解 |
-|------|------|
-| 生成瓶颈 | Docker vLLM TP=2 加速 3-5× |
-| HIP 内核越界写入训练 GPU | --eval-gpu 物理隔离到 GPU 3 |
-| gfx1100 无 Flash Attention | --enforce-eager 禁用 CUDA Graph |
-| Docker 与主机 GPU 冲突 | HIP_VISIBLE_DEVICES 隔离（Ray 要求，替代 ROCR_VISIBLE_DEVICES） |
-| trl vllm-serve fork 崩溃 | trl-vllm-serve wrapper：spawn + \_\_main\_\_ guard |
-| 8B 模型代码能力有限 | 注入 rocm-libraries 参考代码 + 分级奖励 |
-| 采样多样性不足 | temperature=1.0 + reward noise ±0.1 |
-
----
-
-## 8. 开源组件
+## 7. 开源组件
 
 | 组件 | 方案 | 许可证 |
 |------|------|--------|
