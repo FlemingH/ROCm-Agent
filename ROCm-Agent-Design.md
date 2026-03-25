@@ -101,7 +101,7 @@ ROCm-Agent/
 |------|-----|
 | 模型 | `TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill` |
 | LoRA | r=8, alpha=16, q_proj+v_proj, 3.8M 可训练参数 |
-| Thinking | 保留模型自带 `chat_template`，不额外修改 |
+| Thinking | 建议禁用（移除 `add_generation_prompt` 中自动注入的 `<think>`） |
 
 ### 4.2 奖励体系
 
@@ -162,6 +162,21 @@ huggingface-cli download TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-C
   --local-dir models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill
 git clone --depth 1 --branch rocm-7.2.0 \
   https://github.com/ROCm/rocm-libraries.git rocm-libraries
+
+# 禁用 Qwen3 thinking（移除生成起点自动补上的 <think>）
+python3 -c "
+from transformers import AutoTokenizer
+model = 'models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill'
+tok = AutoTokenizer.from_pretrained(model)
+old = '<|im_start|>assistant\n<think>\n'
+new = '<|im_start|>assistant\n'
+if old in tok.chat_template:
+    tok.chat_template = tok.chat_template.replace(old, new)
+    tok.save_pretrained(model)
+    print('Thinking mode disabled.')
+else:
+    print('Thinking prompt marker not found or already disabled.')
+"
 
 # 准备训练数据
 python3 tools/prepare_data.py \
