@@ -122,12 +122,13 @@ ROCm-Agent/
 |------|-----|
 | 有效批量 | batch=1 × grad_accum=4 = 4 |
 | 生成数 / prompt | num_generations=2 |
-| 补全长度 | 128 |
-| 温度 | 1.0 |
+| 补全长度 | 1024 |
+| 温度 | 0.3 |
 | 学习率 | 1e-6 |
 | 轮次 | 2 epochs（约 1350 updates / epoch） |
 | 编译并行 | 4 CPU workers |
 | vLLM 上下文 | `max_model_len=8192` |
+| vLLM IS 校正 | disabled |
 
 ### 4.4 提示词架构
 
@@ -234,11 +235,12 @@ python3 tools/train_grpo.py \
   --batch-size 1 \
   --num-generations 2 \
   --gradient-accumulation 4 \
-  --max-completion-length 128 \
+  --max-completion-length 1024 \
   --lr 1e-6 \
-  --temperature 1.0 \
+  --temperature 0.3 \
   --reward-workers 4 \
   --save-steps 50 \
+  --conservative-eos-stop \
   --output-dir checkpoints/grpo-teichai-2507-qwen3-4b-tp2 \
   > logs/train-teichai-2507-qwen3-4b-tp2.log 2>&1
 ```
