@@ -158,7 +158,7 @@ def parse_args():
     p.add_argument("--lora-alpha", type=int, default=16)
     p.add_argument("--arch", default="gfx1201")
     p.add_argument("--reward-workers", type=int, default=4)
-    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--temperature", type=float, default=0.3)
     p.add_argument("--eval-gpu", default=None,
                    help="GPU id for verify/bench (e.g. '3'). If unset, uses same GPU as training.")
     p.add_argument("--use-vllm", action="store_true",
@@ -244,11 +244,13 @@ def main():
             vllm_mode="server",
             vllm_server_port=args.vllm_port,
             vllm_structured_outputs_regex=STRICT_THREE_FILE_OUTPUT_REGEX,
+            vllm_importance_sampling_correction=False,
         )
         if generation_kwargs is not None:
             grpo_kwargs["generation_kwargs"] = generation_kwargs
         print(f"vLLM server mode: port={args.vllm_port}")
         print("Structured outputs enabled: strict three-file regex")
+        print("vLLM importance sampling correction: disabled")
     else:
         grpo_kwargs.update(
             use_vllm=False,
