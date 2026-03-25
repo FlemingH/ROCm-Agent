@@ -161,6 +161,11 @@ def parse_args():
                    help="GPU id for training model (default 0; set to 2 for 4-GPU vLLM setup)")
     p.add_argument("--vllm-port", type=int, default=8000,
                    help="vLLM server port (default 8000)")
+    p.add_argument(
+        "--conservative-eos-stop",
+        action="store_true",
+        help="Add conservative explicit EOS/stop controls for generation using tokenizer eos_token_id/eos_token.",
+    )
     return p.parse_args()
 
 
@@ -185,6 +190,16 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    generation_kwargs = None
+    if args.conservative_eos_stop:
+        generation_kwargs = {"ignore_eos": False}
+        if tokenizer.eos_token_id is not None:
+            generation_kwargs["stop_token_ids"] = [int(tokenizer.eos_token_id)]
+        if tokenizer.eos_token:
+            generation_kwargs["stop"] = [tokenizer.eos_token]
+            generation_kwargs["include_stop_str_in_output"] = False
+        print(f"Explicit EOS/stop enabled: {generation_kwargs}")
 
     reward_fn = make_reward_fn(args.arch, workdir_abs, eval_gpu, args.reward_workers)
 
@@ -216,6 +231,8 @@ def main():
             vllm_mode="server",
             vllm_server_port=args.vllm_port,
         )
+        if generation_kwargs is not None:
+            grpo_kwargs["generation_kwargs"] = generation_kwargs
         print(f"vLLM server mode: port={args.vllm_port}")
     else:
         grpo_kwargs.update(
