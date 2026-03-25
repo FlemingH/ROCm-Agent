@@ -12,14 +12,14 @@
 |------|------|------|------|------|
 | gfx1100 | RDNA 3 | 4× W7800 | 32 GB 每卡 | **4 卡 vLLM TP=2** |
 
-### 1.2 4 卡显存分配（Qwen3-8B BF16）
+### 1.2 4 卡角色与设备映射（当前正式命令）
 
-| GPU | 角色 | 显存 | 说明 |
-|-----|------|------|------|
-| 0 | vLLM TP shard 0 | ~10 / 32 GB | 模型半体 + KV cache |
-| 1 | vLLM TP shard 1 | ~10 / 32 GB | 模型半体 + KV cache |
-| 2 | 训练 | ~22 / 32 GB | 模型 16.4GB + LoRA + 梯度 + 激活值 |
-| 3 | 评估 | ~2-4 / 32 GB | verify/bench 按需加载，物理隔离 |
+| 物理 GPU | 角色 | 命令映射 | 说明 |
+|----------|------|----------|------|
+| 0 | vLLM TP shard 0 | `CUDA_VISIBLE_DEVICES=2,3` | 当前机器上 `CUDA 2/3 -> 物理 0/1` |
+| 1 | vLLM TP shard 1 | `CUDA_VISIBLE_DEVICES=2,3` | `tensor_parallel_size=2` |
+| 2 | 训练 | `CUDA_VISIBLE_DEVICES=0,1 --train-gpu 1` | 当前机器上 `CUDA 1 -> 物理 2` |
+| 3 | 评估 | `--eval-gpu 3` | `hip_kernel_interaction.py` 使用物理卡号 |
 
 ---
 
@@ -27,12 +27,12 @@
 
 ```
                     ┌────────────────────────────────────┐
-                    │  Host vLLM Server (GPU 0 + 1)      │
+                    │  Host vLLM Server (物理 GPU 0 + 1)  │
                     │  tools/vllm_serve.py, TP = 2       │
                     │  PagedAttention + Continuous Batch  │
   ┌── HTTP req ───→ │  BF16 autoregressive decoding      │
   │                 └───────────────┬────────────────────┘
-  │                                 │ HTTP: completions (8条)
+  │                                 │ HTTP: completions
   │                                 ↓
   │   ┌──────────────────────────────────────────────────┐
   │   │  Host GPU 2: TRL GRPOTrainer                     │
@@ -42,7 +42,7 @@
   │   │  2. 提交 completions → CPU 编译 + GPU 3 验证     │
   │   │  3. 收集 rewards                                 │
   │   │  4. Forward → GRPO loss → Backward → 更新 LoRA   │
-  │   │  5. HTTP: 同步 LoRA 权重 (~7.6MB) → vLLM         │
+  │   │  5. HTTP: 同步 LoRA 权重 → vLLM                  │
   │   └──────┬──────────────┬────────────────────────────┘
   │          │              │
   ←── sync ──┘              │ 提交编译/验证任务
@@ -60,16 +60,14 @@
               └──────────────────────────┘
 ```
 
-**单步时序**（4 卡流水线）：
+**当前正式配置**（4 卡流水线）：
 
-| 阶段 | 耗时 | 说明 |
-|------|------|------|
-| LLM 生成 | ~25-35s | vLLM TP=2, GPU 0+1 |
-| hipcc 编译 | 与生成并行 | 4× CPU workers |
-| GPU eval | 与下轮生成并行 | GPU 3 物理隔离 |
-| 训练 | 与下轮生成并行 | GPU 2 |
-| **单步总时间** | **~40-50s** | |
-| **完整训练** | **~15-19h** | |
+| 阶段 | 当前配置 | 说明 |
+|------|----------|------|
+| LLM 生成 | vLLM TP=2, `max_model_len=8192` | 物理 GPU 0+1 |
+| hipcc 编译 | 4× CPU workers | 与生成/训练并行 |
+| GPU eval | `--eval-gpu 3` | 物理 GPU 3 |
+| 训练 | `--train-gpu 1` | 物理 GPU 2 |
 
 ---
 
@@ -101,9 +99,9 @@ ROCm-Agent/
 
 | 属性 | 值 |
 |------|-----|
-| 模型 | Qwen3-8B (Dense, BF16) |
+| 模型 | `TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill` |
 | LoRA | r=8, alpha=16, q_proj+v_proj, 3.8M 可训练参数 |
-| Thinking | 禁用（修改 chat_template 强制跳过） |
+| Thinking | 保留模型自带 `chat_template`，不额外修改 |
 
 ### 4.2 奖励体系
 
@@ -122,14 +120,14 @@ ROCm-Agent/
 
 | 参数 | 值 |
 |------|-----|
-| 有效批量 | batch=2 × grad_accum=4 = 8 |
-| 生成数 / prompt | num_generations=4 |
-| 补全长度 | 1024 |
+| 有效批量 | batch=1 × grad_accum=4 = 4 |
+| 生成数 / prompt | num_generations=2 |
+| 补全长度 | 128 |
 | 温度 | 1.0 |
 | 学习率 | 1e-6 |
-| 轮次 | 2 epochs (1350 steps) |
+| 轮次 | 2 epochs（约 1350 updates / epoch） |
 | 编译并行 | 4 CPU workers |
-| 预估时间 | ~15-19h |
+| vLLM 上下文 | `max_model_len=8192` |
 
 ### 4.4 提示词架构
 
@@ -160,18 +158,10 @@ pip install -r requirements.txt
 # 下载数据集 + 模型 + rocm-libraries
 huggingface-cli download ASKDESC/CUDA-Agent-Ops-6K \
   --local-dir data/CUDA-Agent-Ops-6K --repo-type dataset
-huggingface-cli download Qwen/Qwen3-8B --local-dir models/Qwen3-8B
+huggingface-cli download TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill \
+  --local-dir models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill
 git clone --depth 1 --branch rocm-7.2.0 \
   https://github.com/ROCm/rocm-libraries.git rocm-libraries
-
-# 禁用 Qwen3 thinking
-python3 -c "
-from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained('models/Qwen3-8B')
-old = \"{%- if enable_thinking is defined and enable_thinking is false %}\\n        {{- '<think>\\\\n\\\\n</think>\\\\n\\\\n' }}\\n    {%- endif %}\"
-tok.chat_template = tok.chat_template.replace(old, \"{{- '<think>\\\\n\\\\n</think>\\\\n\\\\n' }}\")
-tok.save_pretrained('models/Qwen3-8B')
-"
 
 # 准备训练数据
 python3 tools/prepare_data.py \
@@ -192,30 +182,50 @@ pip install https://wheels.vllm.ai/rocm/bcf2be96120005e9aea171927f85055a6a5c0cf6
 # 4. 安装 vLLM 运行时依赖
 pip install -r requirements.txt
 
-# ═══ 4 卡 vLLM 训练 ═══
+# ═══ 4 卡 vLLM 训练（当前正式命令，TP=2） ═══
 
-# 终端 1：启动 vLLM 推理服务（GPU 0+1）
-HIP_VISIBLE_DEVICES=0,1 HSA_OVERRIDE_GFX_VERSION=11.0.0 \
-VLLM_WORKER_MULTIPROC_METHOD=spawn PYTHONUNBUFFERED=1 \
+# 可选：启动前清理残留进程
+pkill -9 -f "tools/train_grpo.py" 2>/dev/null || true
+pkill -9 -f "tools/vllm_serve.py" 2>/dev/null || true
+pkill -9 -f "VLLM::|EngineCore" 2>/dev/null || true
+
+# 终端 1：启动 vLLM 推理服务（物理 GPU 0+1；当前机器上 CUDA 2/3 -> 物理 0/1）
+CUDA_VISIBLE_DEVICES=2,3 \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+PYTHONUNBUFFERED=1 \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
 python3 tools/vllm_serve.py \
-  --model models/Qwen3-8B \
-  --tensor-parallel-size 2 \
+  --model models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill \
+  --tensor_parallel_size 2 \
   --dtype bfloat16 \
-  --gpu-memory-utilization 0.9 \
-  --max-model-len 2048 \
-  --enforce-eager \
-  --port 8000
+  --gpu_memory_utilization 0.82 \
+  --max_model_len 8192 \
+  --enforce_eager \
+  --port 8000 \
+  > logs/vllm-teichai-2507-qwen3-4b-tp2.log 2>&1
 
-# 终端 2：启动 GRPO 训练（GPU 2 训练，GPU 3 评估）
+# 终端 2：启动 GRPO 训练（物理 GPU 2 训练，物理 GPU 3 评估）
+# 注意：当前机器上 CUDA_VISIBLE_DEVICES=0,1 中的 --train-gpu 1 对应物理 GPU 2
+CUDA_VISIBLE_DEVICES=0,1 \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
 python3 tools/train_grpo.py \
-  --model models/Qwen3-8B \
-  --use-vllm --train-gpu 2 --eval-gpu 3 \
+  --model models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill \
+  --use-vllm \
+  --vllm-port 8000 \
+  --train-gpu 1 \
+  --eval-gpu 3 \
   --arch gfx1100 \
-  --epochs 2 --batch-size 2 --num-generations 4 \
-  --gradient-accumulation 4 --lr 1e-6 --temperature 1.0 \
-  --reward-workers 4 --save-steps 50 \
-  --output-dir checkpoints/grpo-8b-vllm \
-  2>&1 | tee logs/train-vllm.log
+  --epochs 2 \
+  --batch-size 1 \
+  --num-generations 2 \
+  --gradient-accumulation 4 \
+  --max-completion-length 128 \
+  --lr 1e-6 \
+  --temperature 1.0 \
+  --reward-workers 4 \
+  --save-steps 50 \
+  --output-dir checkpoints/grpo-teichai-2507-qwen3-4b-tp2 \
+  > logs/train-teichai-2507-qwen3-4b-tp2.log 2>&1
 ```
 
 ---
@@ -235,9 +245,9 @@ python3 tools/train_grpo.py \
 
 | 组件 | 方案 | 许可证 |
 |------|------|--------|
-| 基座模型 | Qwen3-8B (BF16) | Qwen License |
+| 基座模型 | `TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill` | 见模型仓库说明 |
 | RL 框架 | TRL GRPOTrainer | Apache 2.0 |
 | 微调 | PEFT LoRA | Apache 2.0 |
-| 推理加速 | vLLM 0.14.0rc1 (ROCm 7.2, 主机模式) | Apache 2.0 |
+| 推理加速 | vLLM 0.17.1+rocm700（主机模式，TP=2） | Apache 2.0 |
 | 参考代码 | rocm-libraries 7.2.0 | MIT |
 | 数据集 | CUDA-Agent-Ops-6K | — |
