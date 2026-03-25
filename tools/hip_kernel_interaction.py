@@ -142,15 +142,69 @@ class HipKernelInteraction:
             elif filename.endswith(".hip") or filename.endswith(".cpp"):
                 (kernels_dir / filename).write_text(content)
 
+    @staticmethod
+    def _normalize_named_file_headers(text: str) -> str:
+        """Normalize small markdown drift in exact file header lines."""
+        header_map = {
+            "fused_kernel.hip": "**kernels/fused_kernel.hip**",
+            "fused_kernel_binding.cpp": "**kernels/fused_kernel_binding.cpp**",
+            "model_new.py": "**model_new.py**",
+        }
+        for filename, canonical in header_map.items():
+            text = re.sub(
+                rf"(?m)^[ \t*#`-]*(?:kernels/)?{re.escape(filename)}[ \t*#`:\-()]*$",
+                canonical,
+                text,
+            )
+        return text
+
+    @staticmethod
+    def _extract_named_file_blocks(text: str) -> Dict[str, str]:
+        """Extract known file blocks in order, keeping first valid occurrence."""
+        blocks: Dict[str, str] = {}
+        header_to_filename = {
+            "**kernels/fused_kernel.hip**": "fused_kernel.hip",
+            "**kernels/fused_kernel_binding.cpp**": "fused_kernel_binding.cpp",
+            "**model_new.py**": "model_new.py",
+        }
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines):
+            header = lines[i].strip()
+            filename = header_to_filename.get(header)
+            if not filename:
+                i += 1
+                continue
+
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j >= len(lines) or not lines[j].lstrip().startswith("```"):
+                i += 1
+                continue
+
+            code_lines = []
+            k = j + 1
+            while k < len(lines):
+                if lines[k].lstrip().startswith("```"):
+                    if filename not in blocks:
+                        blocks[filename] = "\n".join(code_lines)
+                    i = k
+                    break
+                code_lines.append(lines[k])
+                k += 1
+            else:
+                if filename not in blocks:
+                    blocks[filename] = "\n".join(code_lines)
+                break
+
+            i += 1
+        return blocks
+
     def _parse_code_blocks(self, text: str) -> Dict[str, str]:
         """Extract code blocks — try named headers first, then infer by content."""
-        blocks = {}
-        named = re.compile(
-            r'(?:\*\*|#+\s*)(?:kernels/)?(\S+\.(?:hip|cpp|py))(?:\*\*)?\s*\n```\w*\n(.*?)\n```',
-            re.DOTALL,
-        )
-        for m in named.finditer(text):
-            blocks[m.group(1).strip()] = m.group(2)
+        text = self._normalize_named_file_headers(text)
+        blocks = self._extract_named_file_blocks(text)
         if blocks:
             return blocks
 

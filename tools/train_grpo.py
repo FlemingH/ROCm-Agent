@@ -36,6 +36,12 @@ from trl import GRPOConfig, GRPOTrainer
 from hip_kernel_interaction import HipKernelInteraction
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+STRICT_OUTPUT_STOP_MARKER = "<END_OF_OUTPUT>"
+STRICT_THREE_FILE_OUTPUT_REGEX = (
+    r"\*\*kernels/fused_kernel\.hip\*\*\n```cpp\n[\s\S]*?\n```\n\n"
+    r"\*\*kernels/fused_kernel_binding\.cpp\*\*\n```cpp\n[\s\S]*?\n```\n\n"
+    r"\*\*model_new\.py\*\*\n```python\n[\s\S]*?\n```\n<END_OF_OUTPUT>"
+)
 
 
 def load_dataset_from_parquet(path: str) -> Dataset:
@@ -226,14 +232,23 @@ def main():
     )
 
     if args.use_vllm:
+        if generation_kwargs is None:
+            generation_kwargs = {}
+        stops = list(generation_kwargs.get("stop", []))
+        if STRICT_OUTPUT_STOP_MARKER not in stops:
+            stops.append(STRICT_OUTPUT_STOP_MARKER)
+        generation_kwargs["stop"] = stops
+        generation_kwargs["include_stop_str_in_output"] = False
         grpo_kwargs.update(
             use_vllm=True,
             vllm_mode="server",
             vllm_server_port=args.vllm_port,
+            vllm_structured_outputs_regex=STRICT_THREE_FILE_OUTPUT_REGEX,
         )
         if generation_kwargs is not None:
             grpo_kwargs["generation_kwargs"] = generation_kwargs
         print(f"vLLM server mode: port={args.vllm_port}")
+        print("Structured outputs enabled: strict three-file regex")
     else:
         grpo_kwargs.update(
             use_vllm=False,
