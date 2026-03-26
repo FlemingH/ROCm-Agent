@@ -24,8 +24,8 @@ def find_sources(arch: str) -> list[str]:
     kernel_sources = []
     if kernels_dir.is_dir():
         kernel_sources = (
-            [str(p) for p in kernels_dir.glob('*.hip')]
-            + [str(p) for p in kernels_dir.glob('*.cpp')]
+            [str(p) for p in kernels_dir.glob('*.hip') if not p.name.endswith('_hip.hip')]
+            + [str(p) for p in kernels_dir.glob('*.cpp') if not p.name.endswith('_hip.cpp')]
         )
     return sorted(set(root_sources + kernel_sources))
 
@@ -63,6 +63,8 @@ def compile_kernels(arch: str) -> int:
         )
     except Exception as exc:
         print('Compilation failed.')
+        import traceback
+        traceback.print_exc()
         print(str(exc))
         return 1
 
