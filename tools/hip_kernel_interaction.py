@@ -269,20 +269,23 @@ REGISTER_BINDING(my_kernel, register_my_kernel);
     # --- Subprocess execution ---
 
     async def _run_compile(self, sandbox: Path) -> Tuple[bool, str]:
+        import sys
         return await self._run_cmd(
-            ["bash", "-c", f"cd {sandbox} && PYTORCH_ROCM_ARCH={self.arch} python3 -m tools.compile --arch {self.arch}"],
+            ["bash", "-c", f"cd {sandbox} && PYTORCH_ROCM_ARCH={self.arch} {sys.executable} -m tools.compile --arch {self.arch}"],
             self.compile_timeout,
         )
 
     async def _run_verify(self, sandbox: Path) -> Tuple[bool, str]:
+        import sys
         return await self._run_cmd(
-            ["bash", "-c", f"cd {sandbox} && python3 -m tools.verify --arch {self.arch}"],
+            ["bash", "-c", f"cd {sandbox} && {sys.executable} -m tools.verify --arch {self.arch}"],
             self.verify_timeout, use_eval_gpu=True,
         )
 
     async def _run_profile(self, sandbox: Path) -> Tuple[bool, dict]:
+        import sys
         ok, output = await self._run_cmd(
-            ["bash", "-c", f"cd {sandbox} && python3 -m tools.bench --arch {self.arch} --iters 10"],
+            ["bash", "-c", f"cd {sandbox} && {sys.executable} -m tools.bench --arch {self.arch} --iters 10"],
             self.profile_timeout, use_eval_gpu=True,
         )
         if not ok:
@@ -292,7 +295,16 @@ REGISTER_BINDING(my_kernel, register_my_kernel);
 
     async def _run_cmd(self, cmd: list, timeout: int, use_eval_gpu: bool = False) -> Tuple[bool, str]:
         try:
+            # Ninja is required by torch C++ extensions, add it to PATH if not already
+            import os
+            import sys
             env = {**os.environ, "PYTORCH_ROCM_ARCH": self.arch}
+            
+            # Make sure ninja from conda env is in PATH
+            conda_bin = os.path.dirname(sys.executable)
+            if conda_bin not in env.get("PATH", ""):
+                env["PATH"] = f"{conda_bin}:{env.get('PATH', '')}"
+                
             if use_eval_gpu and self.eval_gpu is not None:
                 env["HIP_VISIBLE_DEVICES"] = str(self.eval_gpu)
                 env["ROCR_VISIBLE_DEVICES"] = str(self.eval_gpu)
