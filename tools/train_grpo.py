@@ -37,10 +37,8 @@ from hip_kernel_interaction import HipKernelInteraction
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STRICT_OUTPUT_STOP_MARKER = "<END_OF_OUTPUT>"
-STRICT_THREE_FILE_OUTPUT_REGEX = (
-    r"\*\*kernels/fused_kernel\.hip\*\*\n```cpp\n[\s\S]*?\n```\n\n"
-    r"\*\*kernels/fused_kernel_binding\.cpp\*\*\n```cpp\n[\s\S]*?\n```\n\n"
-    r"\*\*model_new\.py\*\*\n```python\n[\s\S]*?\n```\n<END_OF_OUTPUT>"
+STRICT_ONE_FILE_OUTPUT_REGEX = (
+    r"\*\*kernels/fused_kernel\.hip\*\*\n```cpp\n[\s\S]*?\n```\n<END_OF_OUTPUT>"
 )
 
 
@@ -243,13 +241,13 @@ def main():
             use_vllm=True,
             vllm_mode="server",
             vllm_server_port=args.vllm_port,
-            vllm_structured_outputs_regex=STRICT_THREE_FILE_OUTPUT_REGEX,
+            vllm_structured_outputs_regex=STRICT_ONE_FILE_OUTPUT_REGEX,
             vllm_importance_sampling_correction=False,
         )
         if generation_kwargs is not None:
             grpo_kwargs["generation_kwargs"] = generation_kwargs
         print(f"vLLM server mode: port={args.vllm_port}")
-        print("Structured outputs enabled: strict three-file regex")
+        print("Structured outputs enabled: strict one-file regex")
         print("vLLM importance sampling correction: disabled")
     else:
         grpo_kwargs.update(

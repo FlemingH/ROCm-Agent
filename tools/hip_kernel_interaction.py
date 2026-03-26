@@ -61,20 +61,16 @@ class HipKernelInteraction:
         self._write_agent_output(sandbox, assistant_code)
 
         parsed = self._parse_code_blocks(assistant_code)
-        has_model_new = "model_new.py" in parsed
         has_hip = any(k.endswith(".hip") for k in parsed)
-        has_binding = any(k.endswith("_binding.cpp") for k in parsed)
 
-        if not has_model_new and not has_hip:
+        if not has_hip:
             should_stop = inst["iteration"] >= self.max_iterations
             return should_stop, "No code files found.", -1.0, {"stage": "no_code"}
 
         compile_ok, compile_msg = await self._run_compile(sandbox)
         if not compile_ok:
-            if has_model_new and has_hip and has_binding:
-                reward = -0.25 if ("undefined" in compile_msg.lower() or "linker" in compile_msg.lower()) else -0.5
-            elif has_model_new and (has_hip or has_binding):
-                reward = -0.75
+            if has_hip:
+                reward = -0.5
             else:
                 reward = -0.9
             should_stop = inst["iteration"] >= self.max_iterations
@@ -136,7 +132,49 @@ class HipKernelInteraction:
         kernels_dir = arch_dir / "kernels"
         for f in kernels_dir.glob("*"):
             f.unlink()
-        for filename, content in self._parse_code_blocks(code).items():
+        
+        parsed = self._parse_code_blocks(code)
+
+        if "fused_kernel_binding.cpp" not in parsed:
+            parsed["fused_kernel_binding.cpp"] = """#include <torch/types.h>
+#include <torch/csrc/utils/pybind.h>
+#include <hip/hip_runtime.h>
+#include <c10/cuda/CUDAStream.h>
+#include "binding_registry.h"
+
+extern "C" void launch_my_kernel(float* output, const float* input, int size, hipStream_t stream);
+
+torch::Tensor my_kernel_forward(torch::Tensor input) {
+    TORCH_CHECK(input.is_cuda(), "Input must be a CUDA tensor");
+    TORCH_CHECK(input.is_contiguous(), "Input must be contiguous");
+    TORCH_CHECK(input.dtype() == torch::kFloat32, "Input must be float32");
+
+    auto output = torch::empty_like(input);
+    hipStream_t stream = c10::cuda::getCurrentCUDAStream().stream();
+    launch_my_kernel(output.data_ptr<float>(), input.data_ptr<float>(), input.numel(), stream);
+    return output;
+}
+
+void register_my_kernel(pybind11::module& m) {
+    m.def("my_kernel_forward", &my_kernel_forward, "My kernel forward");
+}
+REGISTER_BINDING(my_kernel, register_my_kernel);
+"""
+
+        if "model_new.py" not in parsed:
+            model_file = workdir / "model.py"
+            if model_file.exists():
+                model_code = model_file.read_text()
+                parsed["model_new.py"] = re.sub(
+                    r'(\s+)def forward\(self, x\):.*',
+                    r'\1def forward(self, x):\n\1    import hip_extension\n\1    return hip_extension.my_kernel_forward(x)\n',
+                    model_code,
+                    flags=re.DOTALL
+                ).replace("class Model(", "class ModelNew(")
+
+        for filename, content in parsed.items():
+            if filename == "fused_kernel.hip" and "hip_runtime.h" not in content:
+                content = "#include <hip/hip_runtime.h>\n" + content
             if filename == "model_new.py":
                 (arch_dir / filename).write_text(content)
             elif filename.endswith(".hip") or filename.endswith(".cpp"):
