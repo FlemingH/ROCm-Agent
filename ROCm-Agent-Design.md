@@ -73,12 +73,30 @@
 3. 自动正则替换原始模型生成 `model_new.py`。
 
 ### 3.2 保姆级提示词 (SKILL.md)
-* **代码骨架**：直接提供 `__global__` 函数与 `extern "C"` 启动器分离的完美模板。
+* **代码骨架**：直接提供带 `__launch_bounds__(256)` 的 `__global__` 函数与 `extern "C"` 启动器分离的完美模板。
 * **STRICTLY FORBIDDEN**：设立严格红线（禁止嵌套函数、禁止动态内存分配、禁止引入 torch 头文件）。
-* **性能优化指南**：教授模型使用 `float4` 向量化访存、`#pragma unroll` 和底层快速数学函数（如 `__expf`）。
+* **gfx1100 架构规则**：明确标注 wavefront=32、LDS 64KB/CU（≤32KB 保证双 workgroup 占用率）、dispatch gap ≈1.7µs（鼓励 kernel fusion）、避免寄存器溢出。
+* **共享内存归约模板**：提供完整的 tree reduction 代码（`__shared__ float sdata[256]` + `__syncthreads`），直接适用于 softmax、layernorm、sum、max 等需要归约的算子。
+* **性能优化指南**：教授模型使用 `float4` 向量化访存、`#pragma unroll`、快速数学函数（`__expf`、`__fdividef`、`__frsqrt_rn`）、以及 warp-level `__shfl_xor` 归约。
+* **Token 预算**：SKILL.md 约 1232 tokens（系统提示），最坏情况含参考代码的 prompt 约 5513 tokens，加上 1024 补全长度 = 6537 tokens，在 8192 的 vLLM 上下文内有 1655 tokens 余量。
 
 ### 3.3 极简参考代码 (ref_snippets.py)
-摒弃了复杂的 AMD 官方宏定义源码，改为提供硬编码的、纯净的、与 `SKILL.md` 模板完美契合的白话文 C++ 算子实现示例（如 ReLU、Softmax 的简单 for 循环实现），帮助模型快速跨过 0.0 分的编译鸿沟。
+摒弃了复杂的 AMD 官方宏定义源码，改为提供硬编码的、与 `SKILL.md` 模板完美契合的 C++ 算子实现示例，帮助模型快速跨过 0.0 分的编译鸿沟。
+
+**覆盖的算子类别**：
+| 类别 | 算子示例 | 实现方式 |
+|------|----------|----------|
+| 逐元素激活 | ReLU, SiLU, GELU, Sigmoid, Tanh, ELU | `__launch_bounds__(256)` + grid-stride loop + 快速数学 (`__expf`, `__fdividef`) |
+| 归一化 | LayerNorm, RMSNorm, BatchNorm, GroupNorm | 共享内存 2-pass 归约（mean→variance→normalize / sum_sq→inv_rms） |
+| Softmax | softmax, log_softmax | 数值稳定 3-pass 归约（max→sum_exp→normalize）使用 `__shared__` |
+| 归约 | torch.sum, torch.mean | 共享内存 tree reduction |
+| 线性/卷积 | Linear, Conv1d/2d/3d, GEMM | 权重近似（sandbox 约束下的简化实现） |
+
+**关键改进**（相较初始版本）：
+* Softmax 从错误的单 `expf()` 改为数值稳定的 3-pass 共享内存实现
+* LayerNorm/RMSNorm 从空操作 `output=input` 改为正确的共享内存归约实现
+* 所有 kernel 模板加入 `__launch_bounds__(256)` 引导编译器优化寄存器分配
+* 激活函数使用 `__expf`/`__fdividef` 快速数学替代标准库函数
 
 ---
 
