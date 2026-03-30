@@ -3,6 +3,9 @@
 Instead of extracting complex macro-heavy code from rocm-libraries,
 this file provides simplified, straightforward HIP kernel examples 
 that strictly follow the boilerplate structure defined in SKILL.md.
+
+gfx1100 specific: wavefront=32, __launch_bounds__(256), shared memory
+reduction patterns for normalization and softmax ops.
 """
 
 # --- Lazy-loaded snippet cache ---
@@ -16,7 +19,8 @@ def _load_snippets() -> dict[str, str]:
 
     # Standard boilerplate for all simple ops
     def make_unary(name, math_logic):
-        return f"""// {name}
+        return f"""// {name} — elementwise, no reduction needed
+__launch_bounds__(256)
 __global__ void {name.lower()}_kernel(float* output, const float* input, int size) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -29,12 +33,12 @@ __global__ void {name.lower()}_kernel(float* output, const float* input, int siz
 
     _cache["_act_relu"] = make_unary("ReLU", "x > 0.0f ? x : 0.0f")
     _cache["_act_gelu"] = make_unary("GELU", "0.5f * x * (1.0f + erff(x * 0.70710678f))")
-    _cache["_act_silu"] = make_unary("SiLU", "x / (1.0f + expf(-x))")
-    _cache["_act_sigmoid"] = make_unary("Sigmoid", "1.0f / (1.0f + expf(-x))")
+    _cache["_act_silu"] = make_unary("SiLU", "__fdividef(x, 1.0f + __expf(-x))")
+    _cache["_act_sigmoid"] = make_unary("Sigmoid", "__fdividef(1.0f, 1.0f + __expf(-x))")
     _cache["_act_tanh"] = make_unary("Tanh", "tanhf(x)")
-    _cache["_act_elu"] = make_unary("ELU", "x > 0.0f ? x : 1.0f * (expf(x) - 1.0f)")
+    _cache["_act_elu"] = make_unary("ELU", "x > 0.0f ? x : 1.0f * (__expf(x) - 1.0f)")
     _cache["_act_abs"] = make_unary("Abs", "fabsf(x)")
-    _cache["_act_exp"] = make_unary("Exp", "expf(x)")
+    _cache["_act_exp"] = make_unary("Exp", "__expf(x)")
     _cache["_act_log"] = make_unary("Log", "logf(x)")
     _cache["_act_neg"] = make_unary("Neg", "-x")
     
@@ -42,6 +46,7 @@ __global__ void {name.lower()}_kernel(float* output, const float* input, int siz
 
     # Convolution approximation example
     _cache["_conv"] = """// Convolution / Linear Approximation Example
+__launch_bounds__(256)
 __global__ void conv_kernel(float* output, const float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -55,30 +60,136 @@ __global__ void conv_kernel(float* output, const float* input, int size) {
 
     _cache["_gemm"] = _cache["_conv"]
 
-    # LayerNorm/RMSNorm approximation
-    _cache["_layernorm"] = """// Normalization Approximation Example
-__global__ void norm_kernel(float* output, const float* input, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-    for (int i = idx; i < size; i += stride) {
-        // Approximate norm: out = (x - mean) / std * gamma + beta
-        // Assuming mean=0, std=1, gamma=1, beta=0 for simplicity in this sandbox
-        output[i] = input[i]; 
+    # LayerNorm with shared memory reduction (correct pattern)
+    _cache["_layernorm"] = """// LayerNorm with shared memory reduction
+// Assumes entire input is one "row" to normalize (flat array).
+// Uses 2-pass: pass1=compute mean, pass2=compute variance, then normalize.
+__launch_bounds__(256)
+__global__ void layernorm_kernel(float* output, const float* input, int size) {
+    __shared__ float sdata[256];
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    // Pass 1: compute sum for mean
+    float local_sum = 0.0f;
+    for (int i = tid; i < size; i += stride)
+        local_sum += input[i];
+    sdata[tid] = local_sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
     }
+    float mean = __fdividef(sdata[0], (float)size);
+
+    // Pass 2: compute sum of squared differences for variance
+    float local_var = 0.0f;
+    for (int i = tid; i < size; i += stride) {
+        float diff = input[i] - mean;
+        local_var += diff * diff;
+    }
+    sdata[tid] = local_var;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float inv_std = __frsqrt_rn(__fdividef(sdata[0], (float)size) + 1e-5f);
+
+    // Normalize (gamma=1, beta=0)
+    for (int i = tid; i < size; i += stride)
+        output[i] = (input[i] - mean) * inv_std;
 }
 """
-    _cache["_rmsnorm"] = _cache["_layernorm"]
+    _cache["_rmsnorm"] = """// RMSNorm with shared memory reduction
+__launch_bounds__(256)
+__global__ void rmsnorm_kernel(float* output, const float* input, int size) {
+    __shared__ float sdata[256];
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    // Compute sum of squares
+    float local_ss = 0.0f;
+    for (int i = tid; i < size; i += stride)
+        local_ss += input[i] * input[i];
+    sdata[tid] = local_ss;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float inv_rms = __frsqrt_rn(__fdividef(sdata[0], (float)size) + 1e-5f);
+
+    for (int i = tid; i < size; i += stride)
+        output[i] = input[i] * inv_rms;
+}
+"""
     _cache["_batchnorm"] = _cache["_layernorm"]
     _cache["_groupnorm"] = _cache["_layernorm"]
 
-    _cache["_softmax"] = """// Softmax Approximation Example
+    # Softmax with shared memory reduction (numerically stable)
+    _cache["_softmax"] = """// Softmax with shared memory reduction (numerically stable)
+// 1. Find max (for numerical stability)
+// 2. Compute sum of exp(x - max)
+// 3. Divide each exp by sum
+__launch_bounds__(256)
 __global__ void softmax_kernel(float* output, const float* input, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-    for (int i = idx; i < size; i += stride) {
-        // Real softmax requires reduction. For this sandbox, approximate with exp()
-        output[i] = expf(input[i]);
+    __shared__ float sdata[256];
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    // Pass 1: find max
+    float local_max = -1e30f;
+    for (int i = tid; i < size; i += stride)
+        local_max = fmaxf(local_max, input[i]);
+    sdata[tid] = local_max;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        __syncthreads();
     }
+    float max_val = sdata[0];
+
+    // Pass 2: sum of exp(x - max)
+    float local_sum = 0.0f;
+    for (int i = tid; i < size; i += stride)
+        local_sum += __expf(input[i] - max_val);
+    sdata[tid] = local_sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float sum_exp = sdata[0];
+
+    // Pass 3: normalize
+    for (int i = tid; i < size; i += stride)
+        output[i] = __fdividef(__expf(input[i] - max_val), sum_exp);
+}
+"""
+
+    # Sum reduction example (for torch.sum, torch.mean)
+    _cache["_reduce_sum"] = """// Sum Reduction with shared memory
+// Writes total sum to output[0]. Zero-fills rest of output.
+__launch_bounds__(256)
+__global__ void reduce_sum_kernel(float* output, const float* input, int size) {
+    __shared__ float sdata[256];
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    float local_sum = 0.0f;
+    for (int i = tid; i < size; i += stride)
+        local_sum += input[i];
+    sdata[tid] = local_sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) output[0] = sdata[0];
+    // Zero fill remaining output
+    for (int i = tid + 1; i < size; i += stride)
+        output[i] = 0.0f;
 }
 """
 
@@ -120,6 +231,9 @@ _OP_MAP: dict[str, str] = {
 
     # Simple unary math
     "torch.clamp": "_clamp", "torch.clip": "_clamp", "F.hardtanh": "_clamp",
+
+    # Reduction ops
+    "torch.sum": "_reduce_sum", "torch.mean": "_reduce_sum",
 }
 
 
@@ -142,4 +256,6 @@ def get_ref_code(ops: list[str], max_snippets: int = 3) -> str:
             if len(parts) >= max_snippets:
                 break
 
-    return "\n\n".join(parts)
+    if not parts:
+        return ""
+    return "\n".join(parts)
