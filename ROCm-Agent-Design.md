@@ -19,7 +19,9 @@
 | 0 | vLLM TP shard 0 | `CUDA_VISIBLE_DEVICES=2,3` | 当前机器上 `CUDA 2/3 -> 物理 0/1` |
 | 1 | vLLM TP shard 1 | `CUDA_VISIBLE_DEVICES=2,3` | `tensor_parallel_size=2` |
 | 2 | 训练 | `CUDA_VISIBLE_DEVICES=0,1 --train-gpu 1` | 当前机器上 `CUDA 1 -> 物理 2` |
-| 3 | 评估 | `--eval-gpu 3` | `hip_kernel_interaction.py` 使用物理卡号 |
+| 3 | 评估 | `--eval-gpu 0` | `hip_kernel_interaction.py` 使用评测 GPU |
+
+*(注：上述映射保证了 vLLM 和 训练/评估进程在显存和算力上严格物理隔离，避免 OOM 和相互干扰。)*
 
 ---
 
@@ -55,96 +57,62 @@
                             ↓
               ┌──────────────────────────┐
               │  GPU 3: verify + bench   │──→ 奖励分数 (-1.0 ~ +3.0)
-              │  HIP_VISIBLE_DEVICES=3   │
               │  物理隔离，不影响训练     │
               └──────────────────────────┘
 ```
 
-**当前正式配置**（4 卡流水线）：
+---
 
-| 阶段 | 当前配置 | 说明 |
-|------|----------|------|
-| LLM 生成 | vLLM TP=2, `max_model_len=8192` | 物理 GPU 0+1 |
-| hipcc 编译 | 4× CPU workers | 与生成/训练并行 |
-| GPU eval | `--eval-gpu 3` | 物理 GPU 3 |
-| 训练 | `--train-gpu 1` | 物理 GPU 2 |
+## 3. 核心机制设计
+
+### 3.1 模型简化输出 (单文件合约)
+为降低小模型的认知负荷，防止生成内容超长被截断，模型被要求**只输出 1 个文件**：`fused_kernel.hip`。
+系统的 `hip_kernel_interaction.py` 会在后台自动完成以下后处理：
+1. 自动注入 `#include <hip/hip_runtime.h>`。
+2. 自动合成 `fused_kernel_binding.cpp`（PyTorch C++ 扩展胶水代码）。
+3. 自动正则替换原始模型生成 `model_new.py`。
+
+### 3.2 保姆级提示词 (SKILL.md)
+* **代码骨架**：直接提供 `__global__` 函数与 `extern "C"` 启动器分离的完美模板。
+* **STRICTLY FORBIDDEN**：设立严格红线（禁止嵌套函数、禁止动态内存分配、禁止引入 torch 头文件）。
+* **性能优化指南**：教授模型使用 `float4` 向量化访存、`#pragma unroll` 和底层快速数学函数（如 `__expf`）。
+
+### 3.3 极简参考代码 (ref_snippets.py)
+摒弃了复杂的 AMD 官方宏定义源码，改为提供硬编码的、纯净的、与 `SKILL.md` 模板完美契合的白话文 C++ 算子实现示例（如 ReLU、Softmax 的简单 for 循环实现），帮助模型快速跨过 0.0 分的编译鸿沟。
 
 ---
 
-## 3. 目录结构
-
-```
-ROCm-Agent/
-├── tools/                              # 通用脚本（架构无关）
-│   ├── train_grpo.py                   #   GRPO 训练（本地/vLLM 双模式）
-│   ├── hip_kernel_interaction.py       #   编译/验证/profiling + 分级奖励
-│   ├── prepare_data.py                 #   数据预处理 + 参考代码注入
-│   ├── compile.py / verify.py / bench.py
-│
-├── agent_workdir/
-│   ├── binding.cpp / binding_registry.h
-│   └── gfx1100/                        # RDNA 3：SKILL.md + ref_snippets.py
-│
-│   ├── vllm_serve.py                  #   vLLM 推理服务启动器（spawn 修复）
-│
-├── rocm-libraries/                     # 7.2.0 源码（.gitignore）
-├── models/ / data/ / checkpoints/ / logs/
-```
-
----
-
-## 4. 模型与训练
+## 4. 模型与训练参数
 
 ### 4.1 模型
 
 | 属性 | 值 |
 |------|-----|
-| 模型 | `TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill` |
-| LoRA | r=8, alpha=16, q_proj+v_proj, 3.8M 可训练参数 |
-| Thinking | 建议禁用（移除 `add_generation_prompt` 中自动注入的 `<think>`） |
+| 模型 | `janhq/Jan-code-4b` |
+| 特点 | 针对代码生成的专精模型，C++ 遵循能力极强 |
+| LoRA | r=8, alpha=16, q_proj+v_proj |
 
 ### 4.2 奖励体系
 
-| 阶段 | 奖励 |
-|------|------|
-| 无代码 / 部分文件 | -1.0 ~ -0.75 |
-| 编译失败（语法/链接） | -0.5 ~ -0.25 |
-| 编译通过，验证失败 | 0.0 |
-| 验证通过 | +1.0 |
-| 比 Eager 快 >5% | +2.0 |
-| 比 Eager 和 Compile 都快 >5% | +3.0 |
+| 阶段 | 奖励 | 说明 |
+|------|------|------|
+| 无代码 / 部分文件 | -1.0 | 格式错误，未提取到代码块 |
+| 编译失败 (Syntax) | -0.5 | 存在基础的 C++ 语法错误 |
+| 编译失败 (Linker) | -0.25 | 语法正确，但入口函数名 (`launch_my_kernel`) 错误 |
+| 编译通过，验证失败 | 0.0 | 成功上机，但计算逻辑或数值精度不对 |
+| 验证通过 | +1.0 | 逻辑正确，结果与 PyTorch 完全一致 |
+| 比 Eager 快 >5% | +2.0 | 性能超越原生 PyTorch 底层算子 |
+| 极致优化 | +3.0 | 性能超越原生，并击败 `torch.compile` |
 
-额外 ±0.1 随机噪声确保 GRPO advantage 非零。
+### 4.3 训练参数 (防 OOM 极限配置)
 
-### 4.3 训练参数
-
-| 参数 | 值 |
-|------|-----|
-| 有效批量 | batch=1 × grad_accum=4 = 4 |
-| 生成数 / prompt | num_generations=2 |
-| 补全长度 | 1024 |
-| 温度 | 0.3 |
-| 学习率 | 1e-6 |
-| 轮次 | 2 epochs（约 1350 updates / epoch） |
-| 编译并行 | 4 CPU workers |
-| vLLM 上下文 | `max_model_len=8192` |
-| vLLM IS 校正 | disabled |
-
-### 4.4 提示词架构
-
-```
-[system] SKILL.md (84行)
-  ├─ 输出模板：fused_kernel.hip + fused_kernel_binding.cpp + model_new.py
-  └─ 规则：REGISTER_BINDING, extern "C", state_dict 兼容
-
-[user] 指令 + model.py + 参考 HIP 内核（rocm-libraries 按算子匹配注入，70.7% 覆盖）
-
-[assistant] 生成 3 个代码文件
-```
-
-### 4.5 数据集
-
-[CUDA-Agent-Ops-6K](https://huggingface.co/datasets/ASKDESC/CUDA-Agent-Ops-6K)（6000 条），split 为 5400 训练 + 600 验证。
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| 有效批量 | 8 | `batch=1` × `grad_accum=8` |
+| 生成数 / prompt | `num_generations=4` | 每个 prompt 采样 4 次 |
+| 补全长度 | `max_completion_length=1024` | 配合单文件输出和精准停机足够 |
+| 温度 | `0.5` | 鼓励在固定模板内探索不同的数学优化写法 |
+| vLLM 上下文 | `max_model_len=8192` | vLLM 独立推理，不受训练显存限制 |
 
 ---
 
@@ -156,115 +124,75 @@ ROCm-Agent/
 # 安装依赖
 pip install -r requirements.txt
 
-# 下载数据集 + 模型 + rocm-libraries
+# 下载数据集 + 模型
 huggingface-cli download ASKDESC/CUDA-Agent-Ops-6K \
   --local-dir data/CUDA-Agent-Ops-6K --repo-type dataset
-huggingface-cli download TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill \
-  --local-dir models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill
-git clone --depth 1 --branch rocm-7.2.0 \
-  https://github.com/ROCm/rocm-libraries.git rocm-libraries
+huggingface-cli download janhq/Jan-code-4b \
+  --local-dir models/Jan-code-4b
 
-# 禁用 Qwen3 thinking（移除生成起点自动补上的 <think>）
-python3 -c "
-from transformers import AutoTokenizer
-model = 'models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill'
-tok = AutoTokenizer.from_pretrained(model)
-old = '<|im_start|>assistant\n<think>\n'
-new = '<|im_start|>assistant\n'
-if old in tok.chat_template:
-    tok.chat_template = tok.chat_template.replace(old, new)
-    tok.save_pretrained(model)
-    print('Thinking mode disabled.')
-else:
-    print('Thinking prompt marker not found or already disabled.')
-"
-
-# 准备训练数据
+# 准备训练数据 (动态注入 SKILL 模板和精简参考代码)
 python3 tools/prepare_data.py \
   --input data/CUDA-Agent-Ops-6K/data.parquet \
-  --output data/rocm_agent_ops/ --arch gfx1100
+  --output data/rocm_agent_ops/ \
+  --arch gfx1100 \
+  --skill agent_workdir/gfx1100/SKILL.md
 
 # ═══ 安装 vLLM（首次）═══
 
 # 1. 安装 vllm ROCm 预编译包
 pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
 
-# 2. 安装 amdsmi（ROCm 平台检测）
-pip install /opt/rocm-7.2.0/share/amd_smi/
-
-# 3. 安装 flash-attn（ROCm 版）
+# 2. 安装 flash-attn（ROCm 版）
 pip install https://wheels.vllm.ai/rocm/bcf2be96120005e9aea171927f85055a6a5c0cf6/flash_attn-2.8.3-cp312-cp312-manylinux_2_35_x86_64.whl
 
-# 4. 安装 vLLM 运行时依赖
-pip install -r requirements.txt
+# ═══ 4 卡 vLLM 训练（当前正式命令） ═══
 
-# ═══ 4 卡 vLLM 训练（当前正式命令，TP=2） ═══
+# 彻底清理环境防止死锁
+pkill -9 -f "train_grpo.py" || true
+pkill -9 -f "vllm" || true
 
-# 可选：启动前清理残留进程
-pkill -9 -f "tools/train_grpo.py" 2>/dev/null || true
-pkill -9 -f "tools/vllm_serve.py" 2>/dev/null || true
-pkill -9 -f "VLLM::|EngineCore" 2>/dev/null || true
-
-# 终端 1：启动 vLLM 推理服务（物理 GPU 0+1；当前机器上 CUDA 2/3 -> 物理 0/1）
+# 终端 1：启动 vLLM 推理服务（物理 GPU 0+1）
 CUDA_VISIBLE_DEVICES=2,3 \
-VLLM_WORKER_MULTIPROC_METHOD=spawn \
-PYTHONUNBUFFERED=1 \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
-python3 tools/vllm_serve.py \
-  --model models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill \
+nohup python tools/vllm_serve.py \
+  --model models/Jan-code-4b \
   --tensor_parallel_size 2 \
   --dtype bfloat16 \
   --gpu_memory_utilization 0.82 \
   --max_model_len 8192 \
   --enforce_eager \
   --port 8000 \
-  > logs/vllm-teichai-2507-qwen3-4b-tp2.log 2>&1
+  --trust-remote-code > logs/vllm-jan-code-4b.log 2>&1 &
+
+# 等待 vLLM 启动成功后...
 
 # 终端 2：启动 GRPO 训练（物理 GPU 2 训练，物理 GPU 3 评估）
-# 注意：当前机器上 CUDA_VISIBLE_DEVICES=0,1 中的 --train-gpu 1 对应物理 GPU 2
 CUDA_VISIBLE_DEVICES=0,1 \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
-python3 tools/train_grpo.py \
-  --model models/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill \
+nohup python tools/train_grpo.py \
+  --model models/Jan-code-4b \
   --use-vllm \
   --vllm-port 8000 \
   --train-gpu 1 \
-  --eval-gpu 3 \
+  --eval-gpu 0 \
   --arch gfx1100 \
-  --epochs 2 \
   --batch-size 1 \
-  --num-generations 2 \
-  --gradient-accumulation 4 \
+  --num-generations 4 \
+  --gradient-accumulation 8 \
   --max-completion-length 1024 \
-  --lr 1e-6 \
-  --temperature 0.3 \
-  --reward-workers 4 \
-  --save-steps 50 \
+  --temperature 0.5 \
   --conservative-eos-stop \
-  --output-dir checkpoints/grpo-teichai-2507-qwen3-4b-tp2 \
-  > logs/train-teichai-2507-qwen3-4b-tp2.log 2>&1
+  --output-dir checkpoints/grpo-jan-code-4b-b2 \
+  > logs/train-jan-code-4b-b2.log 2>&1 &
 ```
 
 ---
 
-## 6. 路线图
+## 6. 开源组件
 
-| | 阶段 A（当前） | 阶段 B（修复管线） | 阶段 C（自主 Agent） |
-|---|---|---|---|
-| 模式 | 单轮生成 | 2 轮（生成+修复） | 模型自主 N 轮 |
-| 训练框架 | TRL GRPOTrainer | 继承 GRPOTrainer | 自研训练循环 |
-| 改动量 | 已完成 | ~200 行 | ~500 行 |
-| Pass rate | 5-15% | 20-40% | 50-80% |
-
----
-
-## 7. 开源组件
-
-| 组件 | 方案 | 许可证 |
-|------|------|--------|
-| 基座模型 | `TeichAI/Qwen3-4B-Thinking-2507-DeepSeek-v3.2-Speciale-Code-Distill` | 见模型仓库说明 |
-| RL 框架 | TRL GRPOTrainer | Apache 2.0 |
-| 微调 | PEFT LoRA | Apache 2.0 |
-| 推理加速 | vLLM 0.17.1+rocm700（主机模式，TP=2） | Apache 2.0 |
-| 参考代码 | rocm-libraries 7.2.0 | MIT |
-| 数据集 | CUDA-Agent-Ops-6K | — |
+| 组件 | 方案 |
+|------|------|
+| 基座模型 | `janhq/Jan-code-4b` |
+| RL 框架 | TRL GRPOTrainer |
+| 推理加速 | vLLM 0.17.1+rocm700（主机模式，TP=2） |
+| 数据集 | CUDA-Agent-Ops-6K |
