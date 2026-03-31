@@ -3,11 +3,11 @@
 Reward scheme (graduated):
   -1.0   no code files found
   -0.9   partial files only
-  -0.75  model_new + one of hip/binding
-  -0.5   all 3 files, syntax error
-  -0.25  all 3 files, linker error
+  -0.5   compiled failed (syntax/linker error)
    0.0   compiled OK, verification failed
-  +1.0   verification passed
+  +0.3   compiled OK, output shape correct but values wrong
+  +0.5   compiled OK, some checks fully pass (partial verify)
+  +1.0   verification passed (all checks)
   +2.0   faster than Eager by >5%
   +3.0   faster than both Eager and torch.compile by >5%
 """
@@ -78,8 +78,11 @@ class HipKernelInteraction:
 
         verify_ok, verify_msg = await self._run_verify(sandbox)
         if not verify_ok:
+            reward = self._parse_verify_reward(verify_msg)
+            stage = "verify_partial" if reward > 0 else "verify_error"
             should_stop = inst["iteration"] >= self.max_iterations
-            return should_stop, f"Compiled OK, verification failed (reward 0.0):\n{verify_msg}", 0.0, {"stage": "verify_error"}
+            label = "partial" if reward > 0 else "failed"
+            return should_stop, f"Compiled OK, verification {label} (reward {reward:.1f}):\n{verify_msg}", reward, {"stage": stage}
 
         profile_ok, profile_result = await self._run_profile(sandbox)
         if not profile_ok:
@@ -351,6 +354,15 @@ REGISTER_BINDING(fused_kernel, register_fused_kernel);
             "torch_compile_us": float(m.group(2)),
             "hip_extension_us": float(m.group(3)),
         }
+
+    @staticmethod
+    def _parse_verify_reward(verify_msg: str) -> float:
+        """Extract intermediate reward from verify output signals."""
+        if "[PARTIAL_PASS]" in verify_msg:
+            return 0.5
+        if "[SHAPE_OK]" in verify_msg:
+            return 0.3
+        return 0.0
 
     @staticmethod
     def _compute_reward(profile: dict) -> float:
