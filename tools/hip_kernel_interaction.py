@@ -142,9 +142,9 @@ class HipKernelInteraction:
 #include <c10/cuda/CUDAStream.h>
 #include "binding_registry.h"
 
-extern "C" void launch_my_kernel(float* output, const float* input, int size, hipStream_t stream);
+extern "C" void launch_fused_kernel(float* output, const float* input, int size, hipStream_t stream);
 
-torch::Tensor my_kernel_forward(torch::Tensor input) {
+torch::Tensor fused_kernel_forward(torch::Tensor input) {
     TORCH_CHECK(input.is_cuda(), "Input must be a CUDA tensor");
     TORCH_CHECK(input.is_contiguous(), "Input must be contiguous");
     TORCH_CHECK(input.dtype() == torch::kFloat32, "Input must be float32");
@@ -154,21 +154,21 @@ torch::Tensor my_kernel_forward(torch::Tensor input) {
     // Support outputs that need contiguous float32 memory matching the input elements
     // In some cases input is modified, so we just pass data ptrs
     hipStream_t stream = c10::cuda::getCurrentCUDAStream().stream();
-    launch_my_kernel(output.data_ptr<float>(), input.data_ptr<float>(), input.numel(), stream);
+    launch_fused_kernel(output.data_ptr<float>(), input.data_ptr<float>(), input.numel(), stream);
     return output;
 }
 
-void register_my_kernel(pybind11::module& m) {
-    m.def("my_kernel_forward", &my_kernel_forward, "My kernel forward");
+void register_fused_kernel(pybind11::module& m) {
+    m.def("fused_kernel_forward", &fused_kernel_forward, "Fused kernel forward");
 }
-REGISTER_BINDING(my_kernel, register_my_kernel);
+REGISTER_BINDING(fused_kernel, register_fused_kernel);
 """
 
         if "model_new.py" not in parsed:
             model_file = workdir / "model.py"
             if model_file.exists():
                 model_code = model_file.read_text()
-                # Instead of just replacing the body with return hip_extension.my_kernel_forward(x)
+                # Instead of just replacing the body with return hip_extension.fused_kernel_forward(x)
                 # which leaves other submodules intact and causes verify.py to trip on them,
                 # we replace the entire body to clear out old torch logic while keeping signature
                 import re
@@ -180,7 +180,7 @@ REGISTER_BINDING(my_kernel, register_my_kernel);
                 # that replaces everything from def forward to the end of the class/file.
                 new_code = re.sub(
                     r'(\s+)def forward\(.*',
-                    r'\1def forward(self, *args, **kwargs):\n\1    import hip_extension\n\1    return hip_extension.my_kernel_forward(args[0].contiguous())\n',
+                    r'\1def forward(self, *args, **kwargs):\n\1    import hip_extension\n\1    return hip_extension.fused_kernel_forward(args[0].contiguous())\n',
                     new_code,
                     flags=re.DOTALL
                 )
