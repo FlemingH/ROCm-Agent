@@ -73,7 +73,7 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
 
     user_msg = (
         f"Optimize this model with HIP kernels for {arch}. "
-        f"Output the 3 code files, no explanation.\n\n"
+        f"Output exactly 1 file.\n\n"
         f"```python\n{code.strip()}\n```"
         f"{ref_section}"
     )
