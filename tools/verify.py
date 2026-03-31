@@ -97,6 +97,8 @@ def main():
     hip_model.load_state_dict(torch_model.state_dict())
 
     num_checks = 5
+    pass_count = 0
+    shape_ok_count = 0
     with torch.no_grad():
         for i in range(num_checks):
             torch_inputs = get_inputs()
@@ -106,13 +108,44 @@ def main():
             hip_inputs = transform_tensors(torch_inputs, lambda x: x.clone())
 
             torch_output = torch_model(*torch_inputs)
-            with block_torch_functional():
-                hip_output = hip_model(*hip_inputs)
-            check_equal(hip_output, torch_output)
-            print(f"[PASS] check {i + 1}/{num_checks}")
+            try:
+                with block_torch_functional():
+                    hip_output = hip_model(*hip_inputs)
+            except Exception as e:
+                print(f"[FAIL] check {i + 1}/{num_checks}: runtime error: {e}")
+                continue
+
+            # Shape check
+            shape_match = False
+            if isinstance(hip_output, torch.Tensor) and isinstance(torch_output, torch.Tensor):
+                shape_match = hip_output.shape == torch_output.shape and hip_output.dtype == torch_output.dtype
+            elif type(hip_output) == type(torch_output):
+                shape_match = True
+            if shape_match:
+                shape_ok_count += 1
+
+            try:
+                check_equal(hip_output, torch_output)
+                pass_count += 1
+                print(f"[PASS] check {i + 1}/{num_checks}")
+            except Exception as e:
+                if shape_match:
+                    print(f"[SHAPE_OK] check {i + 1}/{num_checks}: values differ: {e}")
+                else:
+                    print(f"[FAIL] check {i + 1}/{num_checks}: {e}")
 
     torch.cuda.synchronize()
-    print("[PASS] verify success")
+    if pass_count == num_checks:
+        print("[PASS] verify success")
+    elif pass_count > 0:
+        print(f"[PARTIAL_PASS] {pass_count}/{num_checks} passed, {shape_ok_count}/{num_checks} shape-correct")
+        sys.exit(1)
+    elif shape_ok_count > 0:
+        print(f"[SHAPE_OK] {shape_ok_count}/{num_checks} shape-correct")
+        sys.exit(1)
+    else:
+        print("[FAIL] verify failed")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
