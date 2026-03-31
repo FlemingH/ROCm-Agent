@@ -157,6 +157,8 @@ def parse_args():
     p.add_argument("--arch", default="gfx1201")
     p.add_argument("--reward-workers", type=int, default=4)
     p.add_argument("--temperature", type=float, default=0.3)
+    p.add_argument("--beta", type=float, default=0.04,
+                   help="KL regularization coefficient (0=no KL penalty, 0.04=standard)")
     p.add_argument("--eval-gpu", default=None,
                    help="GPU id for verify/bench (e.g. '3'). If unset, uses same GPU as training.")
     p.add_argument("--use-vllm", action="store_true",
@@ -227,6 +229,7 @@ def main():
         save_total_limit=3,
         report_to="none",
         remove_unused_columns=False,
+        beta=args.beta,
     )
 
     if args.use_vllm:
