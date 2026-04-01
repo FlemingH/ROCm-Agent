@@ -286,8 +286,8 @@ nohup python -u tools/train_grpo.py \
   --max-completion-length 2048 \
   --temperature 0.7 \
   --conservative-eos-stop \
-  --output-dir checkpoints/grpo-jan-code-4b-b15 \
-  > logs/train-b15.log 2>&1 &
+  --output-dir checkpoints/grpo-jan-code-4b-b16 \
+  > logs/train-b16.log 2>&1 &
 ```
 
 ---
