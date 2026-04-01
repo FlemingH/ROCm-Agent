@@ -284,10 +284,10 @@ nohup python -u tools/train_grpo.py \
   --num-generations 4 \
   --gradient-accumulation 8 \
   --max-completion-length 2048 \
-  --temperature 0.5 \
+  --temperature 0.7 \
   --conservative-eos-stop \
-  --output-dir checkpoints/grpo-jan-code-4b-b11 \
-  > logs/train-b11.log 2>&1 &
+  --output-dir checkpoints/grpo-jan-code-4b-b12 \
+  > logs/train-b12.log 2>&1 &
 ```
 
 ---
