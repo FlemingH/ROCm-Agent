@@ -19,7 +19,7 @@
 | 0 | vLLM TP shard 0 | `CUDA_VISIBLE_DEVICES=2,3` | 当前机器上 `CUDA 2/3 -> 物理 0/1` |
 | 1 | vLLM TP shard 1 | `CUDA_VISIBLE_DEVICES=2,3` | `tensor_parallel_size=2` |
 | 2 | 训练 | `CUDA_VISIBLE_DEVICES=0,1 --train-gpu 1` | 当前机器上 `CUDA 1 -> 物理 2` |
-| 3 | 评估 | `--eval-gpu 0` | `hip_kernel_interaction.py` 使用评测 GPU |
+| 3 | 评估 | `--eval-gpu 1` | `hip_kernel_interaction.py` 使用评测 GPU |
 
 *(注：上述映射保证了 vLLM 和 训练/评估进程在显存和算力上严格物理隔离，避免 OOM 和相互干扰。)*
 
@@ -275,25 +275,19 @@ CUDA_VISIBLE_DEVICES=0,1 \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
 nohup python -u tools/train_grpo.py \
   --model models/Jan-code-4b \
-  --train-data data/rocm_agent_ops/train.parquet \
   --use-vllm \
   --vllm-port 8000 \
   --train-gpu 1 \
-  --eval-gpu 0 \
+  --eval-gpu 1 \
   --arch gfx1100 \
   --batch-size 1 \
-  --num-generations 8 \
+  --num-generations 4 \
   --gradient-accumulation 8 \
-  --max-completion-length 1024 \
-  --lr 1e-5 \
-  --max-steps 2000 \
-  --save-steps 50 \
-  --logging-steps 1 \
-  --lora-r 32 \
-  --lora-alpha 64 \
-  --temperature 1.0 \
-  --output-dir checkpoints/grpo-jan-code-4b-b9 \
-  > logs/train-b9.log 2>&1 &
+  --max-completion-length 2048 \
+  --temperature 0.5 \
+  --conservative-eos-stop \
+  --output-dir checkpoints/grpo-jan-code-4b-b11 \
+  > logs/train-b11.log 2>&1 &
 ```
 
 ---
