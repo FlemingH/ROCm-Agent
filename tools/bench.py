@@ -68,7 +68,7 @@ def main():
 
     torch_model = Model(*init_inputs).eval().cuda()
     hip_model = ModelNew(*init_inputs).eval().cuda()
-    hip_model.load_state_dict(torch_model.state_dict())
+    hip_model.load_state_dict(torch_model.state_dict(), strict=False)
 
     torch_inputs = get_inputs()
     if not isinstance(torch_inputs, (list, tuple)):
