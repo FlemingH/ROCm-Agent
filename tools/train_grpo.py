@@ -72,7 +72,7 @@ def _evaluate_single(args_tuple: tuple) -> float:
 
 
 def make_reward_fn(arch: str, workdir_abs: str, eval_gpu: str,
-                   num_workers: int = 4, reward_noise: float = 0.1):
+                   num_workers: int = 4, reward_noise: float = 0.01):
     """Parallel reward: compile on CPU, verify/bench on eval GPU."""
     executor = ProcessPoolExecutor(max_workers=num_workers)
 
@@ -123,10 +123,10 @@ def load_model(model_path: str, gpu_id: int = 0):
     return model
 
 
-def apply_lora(model, r: int = 8, alpha: int = 16, dropout: float = 0.05):
+def apply_lora(model, r: int = 32, alpha: int = 64, dropout: float = 0.05):
     config = LoraConfig(
         r=r, lora_alpha=alpha,
-        target_modules=["q_proj", "v_proj"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=dropout,
         task_type="CAUSAL_LM",
     )
@@ -146,17 +146,17 @@ def parse_args():
     p.add_argument("--max-completion-length", type=int, default=1024)
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--gradient-accumulation", type=int, default=4)
-    p.add_argument("--num-generations", type=int, default=4)
+    p.add_argument("--num-generations", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-6)
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--max-steps", type=int, default=-1)
     p.add_argument("--save-steps", type=int, default=50)
     p.add_argument("--logging-steps", type=int, default=1)
-    p.add_argument("--lora-r", type=int, default=8)
-    p.add_argument("--lora-alpha", type=int, default=16)
+    p.add_argument("--lora-r", type=int, default=32)
+    p.add_argument("--lora-alpha", type=int, default=64)
     p.add_argument("--arch", default="gfx1201")
     p.add_argument("--reward-workers", type=int, default=4)
-    p.add_argument("--temperature", type=float, default=0.3)
+    p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--beta", type=float, default=0.04,
                    help="KL regularization coefficient (0=no KL penalty, 0.04=standard)")
     p.add_argument("--eval-gpu", default=None,
@@ -239,12 +239,17 @@ def main():
         if STRICT_OUTPUT_STOP_MARKER not in stops:
             stops.append(STRICT_OUTPUT_STOP_MARKER)
         generation_kwargs["stop"] = stops
-        generation_kwargs["include_stop_str_in_output"] = False
+        generation_kwargs["include_stop_str_in_output"] = True
+        # Add EOS token so TRL correctly detects terminated completions
+        if tokenizer.eos_token_id is not None:
+            stop_ids = list(generation_kwargs.get("stop_token_ids", []))
+            if int(tokenizer.eos_token_id) not in stop_ids:
+                stop_ids.append(int(tokenizer.eos_token_id))
+            generation_kwargs["stop_token_ids"] = stop_ids
         grpo_kwargs.update(
             use_vllm=True,
             vllm_mode="server",
             vllm_server_port=args.vllm_port,
-            vllm_structured_outputs_regex=STRICT_ONE_FILE_OUTPUT_REGEX,
             vllm_importance_sampling_correction=False,
         )
         if generation_kwargs is not None:
