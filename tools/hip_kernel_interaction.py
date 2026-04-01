@@ -486,9 +486,21 @@ class HipKernelInteraction:
     @staticmethod
     def _parse_verify_reward(verify_msg: str) -> float:
         """Extract intermediate reward from verify output signals."""
+        import re
         if "[PARTIAL_PASS]" in verify_msg:
             return 0.5
         if "[SHAPE_OK]" in verify_msg:
+            m = re.search(r"AVG_MSE=([0-9.eE+-]+)", verify_msg)
+            if m:
+                mse = float(m.group(1))
+                import math
+                # Map MSE to a continuous reward:
+                # MSE = 0 -> 0.8
+                # MSE = 1 -> 0.4
+                # MSE -> infinity -> approaches 0
+                mse_reward = 0.8 / (1.0 + math.sqrt(mse))
+                # Floor it at 0.05 to give a minimum reward for getting shape right
+                return max(0.05, min(0.8, mse_reward))
             return 0.3
         return 0.0
 

@@ -27,6 +27,15 @@ def transform_tensors(tensors, fn):
     return tensors
 
 
+def compute_mse(actual, expected):
+    if isinstance(actual, torch.Tensor) and isinstance(expected, torch.Tensor):
+        if actual.is_floating_point() and expected.is_floating_point():
+            return F.mse_loss(actual, expected).item()
+        else:
+            return (actual.float() - expected.float()).pow(2).mean().item()
+    return 1e9
+
+
 def check_equal(actual, expected):
     assert type(actual) == type(expected), f"{type(actual)=} != {type(expected)=}"
     if isinstance(actual, (list, tuple)):
@@ -99,6 +108,7 @@ def main():
     num_checks = 5
     pass_count = 0
     shape_ok_count = 0
+    total_mse = 0.0
     with torch.no_grad():
         for i in range(num_checks):
             torch_inputs = get_inputs()
@@ -130,7 +140,9 @@ def main():
                 print(f"[PASS] check {i + 1}/{num_checks}")
             except Exception as e:
                 if shape_match:
-                    print(f"[SHAPE_OK] check {i + 1}/{num_checks}: values differ: {e}")
+                    mse = compute_mse(hip_output, torch_output)
+                    total_mse += mse
+                    print(f"[SHAPE_OK] check {i + 1}/{num_checks}: values differ: MSE={mse}")
                 else:
                     print(f"[FAIL] check {i + 1}/{num_checks}: {e}")
 
@@ -141,7 +153,8 @@ def main():
         print(f"[PARTIAL_PASS] {pass_count}/{num_checks} passed, {shape_ok_count}/{num_checks} shape-correct")
         sys.exit(1)
     elif shape_ok_count > 0:
-        print(f"[SHAPE_OK] {shape_ok_count}/{num_checks} shape-correct")
+        avg_mse = total_mse / shape_ok_count
+        print(f"[SHAPE_OK] {shape_ok_count}/{num_checks} shape-correct, AVG_MSE={avg_mse}")
         sys.exit(1)
     else:
         print("[FAIL] verify failed")
