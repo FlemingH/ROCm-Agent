@@ -21,6 +21,163 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+# ---------- Dynamic binding helpers ----------
+
+CPP_TYPE_MAP = {
+    "float": "float",
+    "double": "double",
+    "int": "int64_t",
+    "int32_t": "int64_t",
+    "int64_t": "int64_t",
+    "bool": "bool",
+    "unsigned int": "int64_t",
+    "size_t": "int64_t",
+}
+
+
+def parse_kernel_extra_params(hip_code: str) -> list[tuple[str, str]]:
+    """Parse launch_fused_kernel signature to extract extra params.
+
+    Returns list of (cpp_type, name) for params between 'int size' and
+    'hipStream_t stream'.  Returns [] for fixed 4-param signature.
+    """
+    m = re.search(
+        r'void\s+launch_fused_kernel\s*\((.*?)\)',
+        hip_code, re.DOTALL,
+    )
+    if not m:
+        return []
+
+    params_str = re.sub(r'\s+', ' ', m.group(1))
+    params = [p.strip() for p in params_str.split(',')]
+
+    size_idx = None
+    stream_idx = None
+    for i, p in enumerate(params):
+        if re.search(r'\bint\s+\w*size\w*\b', p, re.IGNORECASE):
+            size_idx = i
+        if re.search(r'hipStream_t', p):
+            stream_idx = i
+
+    if size_idx is None or stream_idx is None or stream_idx <= size_idx + 1:
+        return []
+
+    extra_params = []
+    for p in params[size_idx + 1:stream_idx]:
+        p = p.strip()
+        m2 = re.match(r'((?:unsigned\s+)?(?:float|double|int|int32_t|int64_t|bool|size_t))\s+(\w+)', p)
+        if m2:
+            extra_params.append((m2.group(1), m2.group(2)))
+        else:
+            return []
+
+    return extra_params
+
+
+def generate_dynamic_binding_cpp(extra_params: list[tuple[str, str]]) -> str:
+    """Generate fused_kernel_binding.cpp matching the kernel's actual signature."""
+    extern_parts = ["float* output", "const float* input", "int size"]
+    for ctype, name in extra_params:
+        extern_parts.append(f"{ctype} {name}")
+    extern_parts.append("hipStream_t stream")
+    extern_decl = ", ".join(extern_parts)
+
+    py_parts = ["torch::Tensor input"]
+    for ctype, name in extra_params:
+        py_type = CPP_TYPE_MAP.get(ctype, ctype)
+        py_parts.append(f"{py_type} {name}")
+    py_sig = ", ".join(py_parts)
+
+    call_parts = ["output.data_ptr<float>()", "input.data_ptr<float>()", "input.numel()"]
+    for ctype, name in extra_params:
+        py_type = CPP_TYPE_MAP.get(ctype, ctype)
+        if py_type != ctype:
+            call_parts.append(f"static_cast<{ctype}>({name})")
+        else:
+            call_parts.append(name)
+    call_parts.append("stream")
+    call_args = ", ".join(call_parts)
+
+    return f"""\
+#include <torch/types.h>
+#include <torch/csrc/utils/pybind.h>
+#include <hip/hip_runtime.h>
+#include <c10/cuda/CUDAStream.h>
+#include "binding_registry.h"
+
+extern "C" void launch_fused_kernel({extern_decl});
+
+torch::Tensor fused_kernel_forward({py_sig}) {{
+    TORCH_CHECK(input.is_cuda(), "Input must be a CUDA tensor");
+    TORCH_CHECK(input.is_contiguous(), "Input must be contiguous");
+    TORCH_CHECK(input.dtype() == torch::kFloat32, "Input must be float32");
+
+    auto output = torch::empty_like(input);
+    hipStream_t stream = c10::cuda::getCurrentCUDAStream().stream();
+    launch_fused_kernel({call_args});
+    return output;
+}}
+
+void register_fused_kernel(pybind11::module& m) {{
+    m.def("fused_kernel_forward", &fused_kernel_forward, "Fused kernel forward");
+}}
+REGISTER_BINDING(fused_kernel, register_fused_kernel);
+"""
+
+
+def parse_init_params(model_code: str) -> list[str]:
+    """Extract __init__ parameter names (excluding self) from model code."""
+    m = re.search(r'def __init__\(self(?:,\s*(.*?))?\)\s*:', model_code)
+    if not m or not m.group(1):
+        return []
+    raw = m.group(1)
+    params = []
+    for p in raw.split(','):
+        p = p.strip()
+        if not p:
+            continue
+        name = p.split('=')[0].strip().split(':')[0].strip()
+        params.append(name)
+    return params
+
+
+def generate_dynamic_model_new(model_code: str, num_kernel_extra_params: int) -> str | None:
+    """Generate ModelNew that stores __init__ args and passes them to kernel."""
+    init_params = parse_init_params(model_code)
+
+    if init_params:
+        init_sig = "self, " + ", ".join(init_params)
+    else:
+        init_sig = "self"
+
+    store_lines = []
+    for name in init_params:
+        store_lines.append(f"        self._kp_{name} = {name}")
+    if not store_lines:
+        store_lines.append("        pass")
+    store_block = "\n".join(store_lines)
+
+    if init_params and num_kernel_extra_params > 0:
+        if len(init_params) != num_kernel_extra_params:
+            return None
+        param_args = ", ".join(f"self._kp_{p}" for p in init_params)
+        fwd_call = f"hip_extension.fused_kernel_forward(args[0].contiguous(), {param_args})"
+    else:
+        fwd_call = "hip_extension.fused_kernel_forward(args[0].contiguous())"
+
+    return f"""import torch
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def __init__({init_sig}):
+        super().__init__()
+{store_block}
+
+    def forward(self, *args, **kwargs):
+        import hip_extension
+        return {fwd_call}
+"""
+
 
 class HipKernelInteraction:
     """Single- or multi-turn agent that compiles/verifies/profiles HIP kernels."""
@@ -44,6 +201,7 @@ class HipKernelInteraction:
         self._instances[instance_id] = {
             "sandbox": sandbox,
             "iteration": 0,
+            "model_code": model_code,
         }
         return instance_id
 
@@ -58,7 +216,7 @@ class HipKernelInteraction:
         if not assistant_code:
             return False, "No code found.", -1.0, {}
 
-        self._write_agent_output(sandbox, assistant_code)
+        self._write_agent_output(sandbox, assistant_code, inst.get("model_code", ""))
 
         parsed = self._parse_code_blocks(assistant_code)
         has_hip = any(k.endswith(".hip") for k in parsed)
@@ -129,65 +287,32 @@ class HipKernelInteraction:
                 return msg.get("content", "")
         return ""
 
-    def _write_agent_output(self, sandbox: Path, code: str):
+    def _write_agent_output(self, sandbox: Path, code: str, model_code: str = ""):
         workdir = sandbox / "agent_workdir"
         arch_dir = workdir / self.arch
         kernels_dir = arch_dir / "kernels"
         for f in kernels_dir.glob("*"):
             f.unlink()
-        
+
         parsed = self._parse_code_blocks(code)
 
-        if "fused_kernel_binding.cpp" not in parsed:
-            parsed["fused_kernel_binding.cpp"] = """#include <torch/types.h>
-#include <torch/csrc/utils/pybind.h>
-#include <hip/hip_runtime.h>
-#include <c10/cuda/CUDAStream.h>
-#include "binding_registry.h"
+        # Auto-generate binding from kernel signature if not provided
+        hip_code = parsed.get("fused_kernel.hip", "")
+        if "fused_kernel_binding.cpp" not in parsed and hip_code:
+            extra_params = parse_kernel_extra_params(hip_code)
+            parsed["fused_kernel_binding.cpp"] = generate_dynamic_binding_cpp(extra_params)
 
-extern "C" void launch_fused_kernel(float* output, const float* input, int size, hipStream_t stream);
-
-torch::Tensor fused_kernel_forward(torch::Tensor input) {
-    TORCH_CHECK(input.is_cuda(), "Input must be a CUDA tensor");
-    TORCH_CHECK(input.is_contiguous(), "Input must be contiguous");
-    TORCH_CHECK(input.dtype() == torch::kFloat32, "Input must be float32");
-
-    auto output = torch::empty_like(input);
-    
-    // Support outputs that need contiguous float32 memory matching the input elements
-    // In some cases input is modified, so we just pass data ptrs
-    hipStream_t stream = c10::cuda::getCurrentCUDAStream().stream();
-    launch_fused_kernel(output.data_ptr<float>(), input.data_ptr<float>(), input.numel(), stream);
-    return output;
-}
-
-void register_fused_kernel(pybind11::module& m) {
-    m.def("fused_kernel_forward", &fused_kernel_forward, "Fused kernel forward");
-}
-REGISTER_BINDING(fused_kernel, register_fused_kernel);
-"""
-
-        if "model_new.py" not in parsed:
-            model_file = workdir / "model.py"
-            if model_file.exists():
-                model_code = model_file.read_text()
-                # Instead of just replacing the body with return hip_extension.fused_kernel_forward(x)
-                # which leaves other submodules intact and causes verify.py to trip on them,
-                # we replace the entire body to clear out old torch logic while keeping signature
-                import re
-                
-                # First rename the class
-                new_code = model_code.replace("class Model(", "class ModelNew(")
-                
-                # Then regex to replace the forward method. We use a more aggressive regex 
-                # that replaces everything from def forward to the end of the class/file.
-                new_code = re.sub(
-                    r'(\s+)def forward\(.*',
-                    r'\1def forward(self, *args, **kwargs):\n\1    import hip_extension\n\1    return hip_extension.fused_kernel_forward(args[0].contiguous())\n',
-                    new_code,
-                    flags=re.DOTALL
-                )
-                parsed["model_new.py"] = new_code
+        # Auto-generate model_new.py if not provided
+        if "model_new.py" not in parsed and hip_code:
+            if not model_code:
+                model_file = workdir / "model.py"
+                if model_file.exists():
+                    model_code = model_file.read_text()
+            if model_code:
+                extra_params = parse_kernel_extra_params(hip_code)
+                model_new = generate_dynamic_model_new(model_code, len(extra_params))
+                if model_new:
+                    parsed["model_new.py"] = model_new
 
         for filename, content in parsed.items():
             if filename == "fused_kernel.hip" and "hip_runtime.h" not in content:
@@ -312,17 +437,16 @@ REGISTER_BINDING(fused_kernel, register_fused_kernel);
 
     async def _run_cmd(self, cmd: list, timeout: int, use_eval_gpu: bool = False) -> Tuple[bool, str]:
         try:
-            # Ninja is required by torch C++ extensions, add it to PATH if not already
-            import os
             import sys
             env = {**os.environ, "PYTORCH_ROCM_ARCH": self.arch}
-            
+
             # Make sure ninja from conda env is in PATH
             conda_bin = os.path.dirname(sys.executable)
             if conda_bin not in env.get("PATH", ""):
                 env["PATH"] = f"{conda_bin}:{env.get('PATH', '')}"
-                
+
             if use_eval_gpu and self.eval_gpu is not None:
+                env["CUDA_VISIBLE_DEVICES"] = str(self.eval_gpu)
                 env["HIP_VISIBLE_DEVICES"] = str(self.eval_gpu)
                 env["ROCR_VISIBLE_DEVICES"] = str(self.eval_gpu)
             proc = await asyncio.create_subprocess_exec(
