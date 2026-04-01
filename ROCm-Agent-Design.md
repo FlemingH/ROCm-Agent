@@ -65,16 +65,18 @@
 
 ## 3. 核心机制设计
 
-### 3.1 模型简化输出 (单文件合约)
+### 3.1 模型简化输出 (单文件合约) + 动态 Binding
 为降低小模型的认知负荷，防止生成内容超长被截断，模型被要求**只输出 1 个文件**：`fused_kernel.hip`。
 系统的 `hip_kernel_interaction.py` 会在后台自动完成以下后处理：
 1. 自动注入 `#include <hip/hip_runtime.h>`。
-2. 自动合成 `fused_kernel_binding.cpp`（PyTorch C++ 扩展胶水代码）。
-3. 自动正则替换原始模型生成 `model_new.py`。
+2. **动态解析** `launch_fused_kernel()` 签名，自动合成参数匹配的 `fused_kernel_binding.cpp`（支持额外参数如 `float slope`, `int dim` 等）。
+3. **动态生成** `model_new.py`：解析原始模型 `__init__` 参数，存储为 `self._kp_*`，在 `forward()` 中传递给 HIP 扩展。
+
+**关键改进**：早期版本使用硬编码 binding（仅支持 `(output, input, size, stream)` 4 参数签名），导致仅 ~15% 数据集可用。动态 binding 通过 `parse_kernel_extra_params()` 自动适配任意参数签名。
 
 ### 3.2 保姆级提示词 (SKILL.md) — 极简版
 
-> **b3 教训**：原始 SKILL.md 包含 12 条规则 + 5 段代码示例 = 1232 tokens，4B 模型因认知过载导致 100% clipped_ratio、29% 编译失败率。简化后 323 tokens，规则从 12→7 条。
+> **b3 教训**：原始 SKILL.md 包含 12 条规则 + 5 段代码示例 = 1232 tokens，4B 模型因认知过载导致 100% clipped_ratio、29% 编译失败率。简化后 323 tokens， 规则从 12→7 条。
 
 * **代码骨架**：直接提供带 `__launch_bounds__(256)` 的 `__global__` 函数与 `extern "C"` 启动器分离的完美模板。
 * **7 条精简规则**：禁止动态内存/torch 头文件/Python 代码、`__global__` 必须顶层定义、使用 `__expf`/`__fdividef` 快速数学、全部 fuse 为单 kernel、输出限制 600 tokens。
@@ -256,7 +258,7 @@ pkill -9 -f "vllm" || true
 # 终端 1：启动 vLLM 推理服务（物理 GPU 0+1）
 CUDA_VISIBLE_DEVICES=2,3 \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
-nohup python tools/vllm_serve.py \
+nohup python -u tools/vllm_serve.py \
   --model models/Jan-code-4b \
   --tensor_parallel_size 2 \
   --dtype bfloat16 \
@@ -271,21 +273,27 @@ nohup python tools/vllm_serve.py \
 # 终端 2：启动 GRPO 训练（物理 GPU 2 训练，物理 GPU 3 评估）
 CUDA_VISIBLE_DEVICES=0,1 \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
-nohup python tools/train_grpo.py \
+nohup python -u tools/train_grpo.py \
   --model models/Jan-code-4b \
+  --train-data data/rocm_agent_ops/train.parquet \
   --use-vllm \
   --vllm-port 8000 \
   --train-gpu 1 \
   --eval-gpu 0 \
   --arch gfx1100 \
   --batch-size 1 \
-  --num-generations 4 \
+  --num-generations 8 \
   --gradient-accumulation 8 \
   --max-completion-length 1024 \
-  --temperature 0.5 \
-  --conservative-eos-stop \
-  --output-dir checkpoints/grpo-jan-code-4b-b2 \
-  > logs/train-jan-code-4b-b2.log 2>&1 &
+  --lr 1e-5 \
+  --max-steps 2000 \
+  --save-steps 50 \
+  --logging-steps 1 \
+  --lora-r 32 \
+  --lora-alpha 64 \
+  --temperature 1.0 \
+  --output-dir checkpoints/grpo-jan-code-4b-b9 \
+  > logs/train-b9.log 2>&1 &
 ```
 
 ---
@@ -297,4 +305,3 @@ nohup python tools/train_grpo.py \
 | 基座模型 | `janhq/Jan-code-4b` |
 | RL 框架 | TRL GRPOTrainer |
 | 推理加速 | vLLM 0.17.1+rocm700（主机模式，TP=2） |
-| 数据集 | CUDA-Agent-Ops-6K |
