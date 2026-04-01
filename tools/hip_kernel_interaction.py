@@ -325,17 +325,11 @@ class HipKernelInteraction:
     @staticmethod
     def _normalize_named_file_headers(text: str) -> str:
         """Normalize small markdown drift in exact file header lines."""
-        header_map = {
-            "fused_kernel.hip": "**kernels/fused_kernel.hip**",
-            "fused_kernel_binding.cpp": "**kernels/fused_kernel_binding.cpp**",
-            "model_new.py": "**model_new.py**",
-        }
-        for filename, canonical in header_map.items():
-            text = re.sub(
-                rf"(?m)^[ \t*#`-]*(?:kernels/)?{re.escape(filename)}[ \t*#`:\-()]*$",
-                canonical,
-                text,
-            )
+        text = re.sub(
+            rf"(?m)^[ \t*#`-]*(?:kernels/)?fused_kernel\.hip[ \t*#`:\-()]*$",
+            "**kernels/fused_kernel.hip**",
+            text,
+        )
         return text
 
     @staticmethod
@@ -344,8 +338,6 @@ class HipKernelInteraction:
         blocks: Dict[str, str] = {}
         header_to_filename = {
             "**kernels/fused_kernel.hip**": "fused_kernel.hip",
-            "**kernels/fused_kernel_binding.cpp**": "fused_kernel_binding.cpp",
-            "**model_new.py**": "model_new.py",
         }
         lines = text.splitlines()
         i = 0
@@ -389,23 +381,12 @@ class HipKernelInteraction:
             return blocks
 
         all_blocks = re.findall(r'```(\w*)\n(.*?)\n```', text, re.DOTALL)
-        py = [(l, c) for l, c in all_blocks if l in ('python', '')]
         cpp = [(l, c) for l, c in all_blocks if l in ('cpp', 'c', 'c++', 'hip')]
 
-        for _, c in py:
-            if 'ModelNew' in c or 'hip_extension' in c:
-                blocks["model_new.py"] = c
-                break
         for _, c in cpp:
-            if 'REGISTER_BINDING' in c or 'binding_registry' in c:
-                blocks["fused_kernel_binding.cpp"] = c
-            elif '__global__' in c or 'hip_runtime' in c:
+            if '__global__' in c or 'hip_runtime' in c:
                 blocks["fused_kernel.hip"] = c
-        if "fused_kernel_binding.cpp" not in blocks:
-            for _, c in cpp:
-                if 'torch/extension' in c or 'torch/types' in c:
-                    blocks["fused_kernel_binding.cpp"] = c
-                    break
+                break
         return blocks
 
     # --- Subprocess execution ---

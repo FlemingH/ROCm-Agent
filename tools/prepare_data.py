@@ -27,16 +27,6 @@ def load_skill(skill_path: str) -> str:
     return Path(skill_path).read_text()
 
 
-def classify_difficulty(ops: list[str]) -> str:
-    n = len(ops)
-    if n <= 1:
-        return "easy"
-    elif n <= 3:
-        return "medium"
-    else:
-        return "hard"
-
-
 _ref_code_fn = None
 
 def _get_ref_code_fn(arch: str):
@@ -61,7 +51,6 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
         ops_list = json.loads(ops)
     else:
         ops_list = [ops] if ops else []
-    difficulty = classify_difficulty(ops_list)
 
     ref_code = get_ref_code(ops_list, max_snippets=3)
     ref_section = ""
@@ -87,14 +76,12 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
         "name": "hip_kernel",
         "model_code": code,
         "ops": json.dumps(ops_list) if isinstance(ops_list, list) else ops_list,
-        "difficulty": difficulty,
         "data_source": data_source,
     }
 
     return {
         "prompt": json.dumps(prompt),
         "interaction_kwargs": json.dumps(interaction_kwargs),
-        "difficulty": difficulty,
         "data_source": data_source,
     }
 
@@ -140,12 +127,7 @@ def main():
     val_samples = samples[:val_size]
     train_samples = samples[val_size:]
 
-    diff_counts = {}
-    for s in train_samples:
-        diff_counts[s["difficulty"]] = diff_counts.get(s["difficulty"], 0) + 1
-
     print(f"Train: {len(train_samples)}, Val: {val_size}")
-    print(f"Difficulty distribution (train): {diff_counts}")
 
     def to_table(rows):
         cols = {k: [r[k] for r in rows] for k in rows[0]}
