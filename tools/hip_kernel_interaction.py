@@ -446,9 +446,13 @@ class HipKernelInteraction:
                 env["PATH"] = f"{conda_bin}:{env.get('PATH', '')}"
 
             if use_eval_gpu and self.eval_gpu is not None:
+                # PyTorch on ROCm uses CUDA_VISIBLE_DEVICES for tensor allocations.
+                # Setting HIP_VISIBLE_DEVICES alongside CUDA_VISIBLE_DEVICES causes
+                # a bug in PyTorch where it says "No HIP GPUs are available".
                 env["CUDA_VISIBLE_DEVICES"] = str(self.eval_gpu)
-                env["HIP_VISIBLE_DEVICES"] = str(self.eval_gpu)
-                env["ROCR_VISIBLE_DEVICES"] = str(self.eval_gpu)
+                # MUST remove these to prevent PyTorch ROCm backend confusion
+                env.pop("HIP_VISIBLE_DEVICES", None)
+                env.pop("ROCR_VISIBLE_DEVICES", None)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
