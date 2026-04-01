@@ -203,7 +203,7 @@ __device__ float warp_reduce_sum(float val) {
 | 无代码 / 部分文件 | -1.0 | 格式错误，未提取到代码块 |
 | 编译失败 (Syntax) | -0.5 | 存在基础的 C++ 语法错误 |
 | 编译失败 (Linker) | -0.25 | 语法正确，但入口函数名 (`launch_my_kernel`) 错误 |
-| 编译通过，验证失败 | 0.0 | 成功上机，但计算逻辑或数值精度不对 |
+| 编译通过，验证失败 | 0.0 ~ 0.8 | 成功上机，若形状相同则根据 MSE 给出 0.05~0.8 的连续分数，否则 0.0 |
 | 验证通过 | +1.0 | 逻辑正确，结果与 PyTorch 完全一致 |
 | 比 Eager 快 >5% | +2.0 | 性能超越原生 PyTorch 底层算子 |
 | 极致优化 | +3.0 | 性能超越原生，并击败 `torch.compile` |
@@ -286,8 +286,8 @@ nohup python -u tools/train_grpo.py \
   --max-completion-length 2048 \
   --temperature 0.7 \
   --conservative-eos-stop \
-  --output-dir checkpoints/grpo-jan-code-4b-b12 \
-  > logs/train-b12.log 2>&1 &
+  --output-dir checkpoints/grpo-jan-code-4b-b13 \
+  > logs/train-b13.log 2>&1 &
 ```
 
 ---
