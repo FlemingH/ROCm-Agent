@@ -145,8 +145,9 @@ def generate_dynamic_model_new(model_code: str, num_kernel_extra_params: int) ->
     """Generate ModelNew that stores __init__ args and passes them to kernel."""
     init_params = parse_init_params(model_code)
 
-    if init_params:
-        init_sig = "self, " + ", ".join(init_params)
+    m = re.search(r'def __init__\((.*?)\)\s*:', model_code)
+    if m:
+        init_sig = m.group(1)
     else:
         init_sig = "self"
 
