@@ -65,7 +65,9 @@ def _evaluate_single(args_tuple: tuple) -> float:
         _, _, reward, _ = loop.run_until_complete(interaction.generate_response(iid, msgs))
         loop.run_until_complete(interaction.finalize_interaction(iid))
         return max(reward, -1.0)
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"Worker exception: {e}\n{traceback.format_exc()}")
         return -1.0
     finally:
         loop.close()
@@ -265,7 +267,6 @@ def main():
             use_vllm=True,
             vllm_mode="server",
             vllm_server_port=args.vllm_port,
-            vllm_structured_outputs_regex=STRICT_ONE_FILE_OUTPUT_REGEX,
             vllm_importance_sampling_correction=False,
         )
         if generation_kwargs is not None:

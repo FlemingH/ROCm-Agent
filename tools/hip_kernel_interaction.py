@@ -254,6 +254,10 @@ class HipKernelInteraction:
         has_hip = any(k.endswith(".hip") for k in parsed)
 
         if not has_hip:
+            with open("/tmp/b21_no_hip.log", "a") as f:
+                f.write("==== NO HIP FOUND ====\n")
+                f.write(assistant_code)
+                f.write("\n======================\n")
             should_stop = inst["iteration"] >= self.max_iterations
             return should_stop, "No code files found.", -1.0, {"stage": "no_code"}
 
