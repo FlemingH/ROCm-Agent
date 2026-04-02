@@ -30,7 +30,8 @@ Rules:
 - Always fuse all operations into 1 `__global__` kernel.
 - Always add `__launch_bounds__(256)` before `__global__`.
 - Always include an `extern "C"` launcher named `launch_fused_kernel`.
-- Always use exactly 4 parameters: `(float* output, const float* input, int size, hipStream_t stream)`.
+- Base parameters: `(float* output, const float* input, int size, hipStream_t stream)`.
+- If **weight tensors** are listed in the prompt, add them as `const float*` parameters between `int size` and `hipStream_t stream`. Match the exact names from the prompt.
 - Always define `__global__` functions at file scope.
 - Always use `__expf(x)` for exp and `__fdividef(a,b)` for division.
 - Always use `#include <hip/hip_runtime.h>` as the only include.

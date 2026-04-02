@@ -82,6 +82,37 @@ def load_module_from_file(name: str, path: Path):
     return mod
 
 
+def _get_weight_tensors(model):
+    """Extract float32 weight tensors from state_dict in deterministic order.
+
+    Skips non-float tensors (e.g. BatchNorm's num_batches_tracked is int64).
+    """
+    return [v.contiguous() for v in model.state_dict().values()
+            if v.is_floating_point()]
+
+
+def _make_dynamic_model_new(Model):
+    """Create a ModelNew class that inherits Model and overrides forward().
+
+    The new forward() extracts all float32 weight tensors from the model and
+    passes them (along with forward inputs) to hip_extension.fused_kernel_forward().
+
+    This ensures load_state_dict(strict=True) works because DynamicModelNew
+    has the exact same parameter structure as Model.
+    """
+    class DynamicModelNew(Model):
+        def forward(self, *args, **kwargs):
+            import hip_extension
+            weights = _get_weight_tensors(self)
+            input_tensors = [a.contiguous() for a in args
+                             if isinstance(a, torch.Tensor)]
+            return hip_extension.fused_kernel_forward(*input_tensors, *weights)
+
+    DynamicModelNew.__name__ = "ModelNew"
+    DynamicModelNew.__qualname__ = "ModelNew"
+    return DynamicModelNew
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
@@ -94,8 +125,13 @@ def main():
     get_inputs = model_mod.get_inputs
     get_init_inputs = model_mod.get_init_inputs
 
-    model_new_mod = load_module_from_file("model_new", WORKDIR / args.arch / "model_new.py")
-    ModelNew = model_new_mod.ModelNew
+    # Try file-based model_new.py first (backward compat), fall back to dynamic
+    model_new_path = WORKDIR / args.arch / "model_new.py"
+    if model_new_path.exists():
+        model_new_mod = load_module_from_file("model_new", model_new_path)
+        ModelNew = model_new_mod.ModelNew
+    else:
+        ModelNew = _make_dynamic_model_new(Model)
 
     init_inputs = get_init_inputs()
     if not isinstance(init_inputs, (list, tuple)):

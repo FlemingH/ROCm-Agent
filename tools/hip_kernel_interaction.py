@@ -40,6 +40,9 @@ def parse_kernel_extra_params(hip_code: str) -> list[tuple[str, str]]:
 
     Returns list of (cpp_type, name) for params between 'int size' and
     'hipStream_t stream'.  Returns [] for fixed 4-param signature.
+
+    Supports both scalar types (int, float, ...) and pointer types
+    (const float*, const double*) for weight tensor passing.
     """
     m = re.search(
         r'void\s+launch_fused_kernel\s*\((.*?)\)',
@@ -65,17 +68,38 @@ def parse_kernel_extra_params(hip_code: str) -> list[tuple[str, str]]:
     extra_params = []
     for p in params[size_idx + 1:stream_idx]:
         p = p.strip()
+        # Match pointer types: const float* name, const double* name, float* name
+        m_ptr = re.match(r'(const\s+(?:float|double)\s*\*|(?:float|double)\s*\*)\s*(\w+)', p)
+        if m_ptr:
+            extra_params.append((m_ptr.group(1).strip(), m_ptr.group(2)))
+            continue
+        # Match scalar types: int name, float scale, etc.
         m2 = re.match(r'((?:unsigned\s+)?(?:float|double|int|int32_t|int64_t|bool|size_t))\s+(\w+)', p)
         if m2:
             extra_params.append((m2.group(1), m2.group(2)))
-        else:
-            return []
+            continue
+        # Unknown param type - bail out
+        return []
 
     return extra_params
 
 
+def _is_pointer_type(ctype: str) -> bool:
+    """Check if a C++ type string is a pointer type (e.g. 'const float*')."""
+    return '*' in ctype
+
+
+def _pointer_base_dtype(ctype: str) -> str:
+    """Extract base dtype from pointer type: 'const float*' -> 'float'."""
+    return ctype.replace('const', '').replace('*', '').strip()
+
+
 def generate_dynamic_binding_cpp(extra_params: list[tuple[str, str]]) -> str:
-    """Generate fused_kernel_binding.cpp matching the kernel's actual signature."""
+    """Generate fused_kernel_binding.cpp matching the kernel's actual signature.
+
+    Supports both scalar params (int, float) and pointer/tensor params
+    (const float*) which are exposed as torch::Tensor on the Python side.
+    """
     extern_parts = ["float* output", "const float* input", "int size"]
     for ctype, name in extra_params:
         extern_parts.append(f"{ctype} {name}")
@@ -84,17 +108,24 @@ def generate_dynamic_binding_cpp(extra_params: list[tuple[str, str]]) -> str:
 
     py_parts = ["torch::Tensor input"]
     for ctype, name in extra_params:
-        py_type = CPP_TYPE_MAP.get(ctype, ctype)
-        py_parts.append(f"{py_type} {name}")
+        if _is_pointer_type(ctype):
+            py_parts.append(f"torch::Tensor {name}")
+        else:
+            py_type = CPP_TYPE_MAP.get(ctype, ctype)
+            py_parts.append(f"{py_type} {name}")
     py_sig = ", ".join(py_parts)
 
     call_parts = ["output.data_ptr<float>()", "input.data_ptr<float>()", "input.numel()"]
     for ctype, name in extra_params:
-        py_type = CPP_TYPE_MAP.get(ctype, ctype)
-        if py_type != ctype:
-            call_parts.append(f"static_cast<{ctype}>({name})")
+        if _is_pointer_type(ctype):
+            base = _pointer_base_dtype(ctype)
+            call_parts.append(f"{name}.data_ptr<{base}>()")
         else:
-            call_parts.append(name)
+            py_type = CPP_TYPE_MAP.get(ctype, ctype)
+            if py_type != ctype:
+                call_parts.append(f"static_cast<{ctype}>({name})")
+            else:
+                call_parts.append(name)
     call_parts.append("stream")
     call_args = ", ".join(call_parts)
 
@@ -303,17 +334,9 @@ class HipKernelInteraction:
             extra_params = parse_kernel_extra_params(hip_code)
             parsed["fused_kernel_binding.cpp"] = generate_dynamic_binding_cpp(extra_params)
 
-        # Auto-generate model_new.py if not provided
-        if "model_new.py" not in parsed and hip_code:
-            if not model_code:
-                model_file = workdir / "model.py"
-                if model_file.exists():
-                    model_code = model_file.read_text()
-            if model_code:
-                extra_params = parse_kernel_extra_params(hip_code)
-                model_new = generate_dynamic_model_new(model_code, len(extra_params))
-                if model_new:
-                    parsed["model_new.py"] = model_new
+        # Note: model_new.py is now generated dynamically by verify.py
+        # using DynamicModelNew(Model) which inherits the original Model's
+        # parameter structure, ensuring load_state_dict works correctly.
 
         for filename, content in parsed.items():
             if filename == "fused_kernel.hip" and "hip_runtime.h" not in content:

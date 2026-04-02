@@ -41,6 +41,58 @@ def _get_ref_code_fn(arch: str):
     return _ref_code_fn
 
 
+def extract_weight_info(model_code: str) -> str:
+    """Extract weight tensor info from model code by instantiating the Model.
+
+    Returns a formatted string describing the weight tensors that will be
+    passed to the kernel, or empty string if no weights are needed.
+    """
+    import importlib.util
+    import tempfile
+    import torch
+    import torch.nn as nn
+
+    # Write model code to temp file and import it
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(model_code)
+            tmp_path = f.name
+        spec = importlib.util.spec_from_file_location("_tmp_model", tmp_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        Model = mod.Model
+        get_init_inputs = mod.get_init_inputs
+
+        init_inputs = get_init_inputs()
+        if not isinstance(init_inputs, (list, tuple)):
+            init_inputs = [init_inputs]
+
+        model = Model(*init_inputs)
+        sd = model.state_dict()
+
+        # Filter to float32 tensors only (skip int64 like num_batches_tracked)
+        float_items = [(k, v) for k, v in sd.items() if v.is_floating_point()]
+        if not float_items:
+            return ""
+
+        lines = []
+        for key, tensor in float_items:
+            # Sanitize key for C identifier: bn.weight -> bn_weight
+            c_name = key.replace('.', '_')
+            shape_str = ','.join(str(s) for s in tensor.shape)
+            lines.append(f"  - const float* {c_name}  shape=({shape_str})")
+
+        return "\nWeight tensors (add as `const float*` params between `int size` and `hipStream_t stream`):\n" + "\n".join(lines) + "\n"
+    except Exception:
+        return ""
+    finally:
+        import os
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
 def make_chat_sample(code: str, ops: list[str], data_source: str,
                      skill_text: str, arch: str) -> dict:
     get_ref_code = _get_ref_code_fn(arch)
@@ -60,11 +112,14 @@ def make_chat_sample(code: str, ops: list[str], data_source: str,
             f"```cpp\n{ref_code}\n```"
         )
 
+    weight_info = extract_weight_info(code)
+
     user_msg = (
         f"Optimize this model with HIP kernels for {arch}. "
         f"Output exactly 1 file.\n\n"
         f"```python\n{code.strip()}\n```"
         f"{ref_section}"
+        f"{weight_info}"
     )
 
     prompt = [
