@@ -113,87 +113,101 @@ def _make_dynamic_model_new(Model):
     return DynamicModelNew
 
 
+import io
+import contextlib
+
+def run(sandbox_dir: Path, arch: str) -> tuple[bool, str]:
+    sys.path.insert(0, str(sandbox_dir.resolve()))
+    try:
+        model_mod = load_module_from_file("model", sandbox_dir / "model.py")
+        Model = model_mod.Model
+        get_inputs = model_mod.get_inputs
+        get_init_inputs = model_mod.get_init_inputs
+
+        model_new_path = sandbox_dir / arch / "model_new.py"
+        if model_new_path.exists():
+            model_new_mod = load_module_from_file("model_new", model_new_path)
+            ModelNew = model_new_mod.ModelNew
+        else:
+            ModelNew = _make_dynamic_model_new(Model)
+
+        init_inputs = get_init_inputs()
+        if not isinstance(init_inputs, (list, tuple)):
+            init_inputs = [init_inputs]
+
+        torch_model = Model(*init_inputs).eval().cuda()
+        hip_model = ModelNew(*init_inputs).eval().cuda()
+        hip_model.load_state_dict(torch_model.state_dict(), strict=False)
+
+        num_checks = 5
+        pass_count = 0
+        shape_ok_count = 0
+        total_mse = 0.0
+        
+        output_lines = []
+        with torch.no_grad():
+            for i in range(num_checks):
+                torch_inputs = get_inputs()
+                if not isinstance(torch_inputs, (list, tuple)):
+                    torch_inputs = [torch_inputs]
+                torch_inputs = transform_tensors(torch_inputs, lambda x: x.cuda())
+                hip_inputs = transform_tensors(torch_inputs, lambda x: x.clone())
+
+                torch_output = torch_model(*torch_inputs)
+                try:
+                    with block_torch_functional():
+                        hip_output = hip_model(*hip_inputs)
+                except Exception as e:
+                    output_lines.append(f"[FAIL] check {i + 1}/{num_checks}: runtime error: {e}")
+                    continue
+
+                shape_match = False
+                if isinstance(hip_output, torch.Tensor) and isinstance(torch_output, torch.Tensor):
+                    shape_match = hip_output.shape == torch_output.shape and hip_output.dtype == torch_output.dtype
+                elif type(hip_output) == type(torch_output):
+                    shape_match = True
+                if shape_match:
+                    shape_ok_count += 1
+
+                try:
+                    check_equal(hip_output, torch_output)
+                    pass_count += 1
+                    output_lines.append(f"[PASS] check {i + 1}/{num_checks}")
+                except Exception as e:
+                    if shape_match:
+                        mse = compute_mse(hip_output, torch_output)
+                        total_mse += mse
+                        output_lines.append(f"[SHAPE_OK] check {i + 1}/{num_checks}: values differ: MSE={mse}")
+                    else:
+                        output_lines.append(f"[FAIL] check {i + 1}/{num_checks}: {e}")
+
+        torch.cuda.synchronize()
+        output_str = "\n".join(output_lines)
+        if pass_count == num_checks:
+            return True, output_str + "\n[PASS] verify success"
+        elif pass_count > 0:
+            return False, output_str + f"\n[PARTIAL_PASS] {pass_count}/{num_checks} passed, {shape_ok_count}/{num_checks} shape-correct"
+        elif shape_ok_count > 0:
+            avg_mse = total_mse / shape_ok_count
+            return False, output_str + f"\n[SHAPE_OK] {shape_ok_count}/{num_checks} shape-correct, AVG_MSE={avg_mse}"
+        else:
+            return False, output_str + "\n[FAIL] verify failed"
+    except Exception as e:
+        import traceback
+        return False, f"Verification script error:\n{traceback.format_exc()}"
+    finally:
+        sys.path.remove(str(sandbox_dir.resolve()))
+        torch.cuda.empty_cache()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
     args = parser.parse_args()
 
-    sys.path.insert(0, str(WORKDIR.resolve()))
-
-    model_mod = load_module_from_file("model", WORKDIR / "model.py")
-    Model = model_mod.Model
-    get_inputs = model_mod.get_inputs
-    get_init_inputs = model_mod.get_init_inputs
-
-    # Try file-based model_new.py first (backward compat), fall back to dynamic
-    model_new_path = WORKDIR / args.arch / "model_new.py"
-    if model_new_path.exists():
-        model_new_mod = load_module_from_file("model_new", model_new_path)
-        ModelNew = model_new_mod.ModelNew
-    else:
-        ModelNew = _make_dynamic_model_new(Model)
-
-    init_inputs = get_init_inputs()
-    if not isinstance(init_inputs, (list, tuple)):
-        init_inputs = [init_inputs]
-
-    torch_model = Model(*init_inputs).eval().cuda()
-    hip_model = ModelNew(*init_inputs).eval().cuda()
-    hip_model.load_state_dict(torch_model.state_dict(), strict=False)
-
-    num_checks = 5
-    pass_count = 0
-    shape_ok_count = 0
-    total_mse = 0.0
-    with torch.no_grad():
-        for i in range(num_checks):
-            torch_inputs = get_inputs()
-            if not isinstance(torch_inputs, (list, tuple)):
-                torch_inputs = [torch_inputs]
-            torch_inputs = transform_tensors(torch_inputs, lambda x: x.cuda())
-            hip_inputs = transform_tensors(torch_inputs, lambda x: x.clone())
-
-            torch_output = torch_model(*torch_inputs)
-            try:
-                with block_torch_functional():
-                    hip_output = hip_model(*hip_inputs)
-            except Exception as e:
-                print(f"[FAIL] check {i + 1}/{num_checks}: runtime error: {e}")
-                continue
-
-            # Shape check
-            shape_match = False
-            if isinstance(hip_output, torch.Tensor) and isinstance(torch_output, torch.Tensor):
-                shape_match = hip_output.shape == torch_output.shape and hip_output.dtype == torch_output.dtype
-            elif type(hip_output) == type(torch_output):
-                shape_match = True
-            if shape_match:
-                shape_ok_count += 1
-
-            try:
-                check_equal(hip_output, torch_output)
-                pass_count += 1
-                print(f"[PASS] check {i + 1}/{num_checks}")
-            except Exception as e:
-                if shape_match:
-                    mse = compute_mse(hip_output, torch_output)
-                    total_mse += mse
-                    print(f"[SHAPE_OK] check {i + 1}/{num_checks}: values differ: MSE={mse}")
-                else:
-                    print(f"[FAIL] check {i + 1}/{num_checks}: {e}")
-
-    torch.cuda.synchronize()
-    if pass_count == num_checks:
-        print("[PASS] verify success")
-    elif pass_count > 0:
-        print(f"[PARTIAL_PASS] {pass_count}/{num_checks} passed, {shape_ok_count}/{num_checks} shape-correct")
-        sys.exit(1)
-    elif shape_ok_count > 0:
-        avg_mse = total_mse / shape_ok_count
-        print(f"[SHAPE_OK] {shape_ok_count}/{num_checks} shape-correct, AVG_MSE={avg_mse}")
-        sys.exit(1)
-    else:
-        print("[FAIL] verify failed")
+    ok, msg = run(WORKDIR, args.arch)
+    print(msg)
+    if not ok:
         sys.exit(1)
 
 

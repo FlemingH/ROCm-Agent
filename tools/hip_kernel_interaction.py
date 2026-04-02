@@ -423,22 +423,26 @@ class HipKernelInteraction:
         )
 
     async def _run_verify(self, sandbox: Path) -> Tuple[bool, str]:
-        import sys
-        return await self._run_cmd(
-            ["bash", "-c", f"cd {sandbox} && {sys.executable} -m tools.verify --arch {self.arch}"],
-            self.verify_timeout, use_eval_gpu=True,
-        )
+        import tools.verify
+        # Run in-process to avoid Python startup overhead
+        try:
+            ok, msg = tools.verify.run(sandbox / "agent_workdir", self.arch)
+            return ok, msg
+        except Exception as e:
+            import traceback
+            return False, f"Verification script error:\n{traceback.format_exc()}"
 
     async def _run_profile(self, sandbox: Path) -> Tuple[bool, dict]:
-        import sys
-        ok, output = await self._run_cmd(
-            ["bash", "-c", f"cd {sandbox} && {sys.executable} -m tools.bench --arch {self.arch} --iters 10"],
-            self.profile_timeout, use_eval_gpu=True,
-        )
-        if not ok:
+        import tools.bench
+        # Run in-process to avoid Python startup overhead
+        try:
+            ok, output = tools.bench.run(sandbox / "agent_workdir", self.arch, iters=10)
+            if not ok:
+                return False, {}
+            result = self._parse_profile_output(output)
+            return (True, result) if result else (False, {})
+        except Exception as e:
             return False, {}
-        result = self._parse_profile_output(output)
-        return (True, result) if result else (False, {})
 
     async def _run_cmd(self, cmd: list, timeout: int, use_eval_gpu: bool = False) -> Tuple[bool, str]:
         try:

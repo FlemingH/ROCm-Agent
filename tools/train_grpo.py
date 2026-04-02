@@ -68,10 +68,25 @@ def _evaluate_single(args_tuple: tuple) -> float:
         loop.close()
 
 
+def _init_worker(eval_gpu: str):
+    import os
+    if eval_gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(eval_gpu)
+        os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+    # Import torch here so each worker pays the 1-second initialization cost exactly once.
+    try:
+        import torch
+        # Optional: initialize CUDA context
+        if torch.cuda.is_available():
+            torch.cuda.init()
+    except Exception:
+        pass
+
 def make_reward_fn(arch: str, workdir_abs: str, eval_gpu: str,
                    num_workers: int = 4, reward_noise: float = 0.01):
     """Parallel reward: compile on CPU, verify/bench on eval GPU."""
-    executor = ProcessPoolExecutor(max_workers=num_workers)
+    executor = ProcessPoolExecutor(max_workers=num_workers, initializer=_init_worker, initargs=(eval_gpu,))
 
     def reward_fn(completions: list[str], prompts: list = None, **kwargs) -> list[float]:
         tasks = []
