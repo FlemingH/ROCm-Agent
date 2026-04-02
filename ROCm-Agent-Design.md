@@ -289,12 +289,13 @@ nohup python -u tools/train_grpo.py \
   --batch-size 1 \
   --num-generations 4 \
   --gradient-accumulation 8 \
+  --reward-workers 8 \
   --max-completion-length 2048 \
   --temperature 0.7 \
   --conservative-eos-stop \
   --train-data data/rocm_agent_ops_v5/train.parquet \
-  --output-dir checkpoints/grpo-jan-code-4b-b18 \
-  > logs/train-b18.log 2>&1 &
+  --output-dir checkpoints/grpo-jan-code-4b-b19 \
+  > logs/train-b19.log 2>&1 &
 ```
 
 ---
