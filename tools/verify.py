@@ -91,7 +91,7 @@ def _get_weight_tensors(model):
             if v.is_floating_point()]
 
 
-def _make_dynamic_model_new(Model):
+def _make_dynamic_model_new(Model, ext_name: str = "hip_extension"):
     """Create a ModelNew class that inherits Model and overrides forward().
 
     The new forward() extracts all float32 weight tensors from the model and
@@ -102,7 +102,8 @@ def _make_dynamic_model_new(Model):
     """
     class DynamicModelNew(Model):
         def forward(self, *args, **kwargs):
-            import hip_extension
+            import importlib
+            hip_extension = importlib.import_module(ext_name)
             weights = _get_weight_tensors(self)
             input_tensors = [a.contiguous() for a in args
                              if isinstance(a, torch.Tensor)]
@@ -116,7 +117,7 @@ def _make_dynamic_model_new(Model):
 import io
 import contextlib
 
-def run(sandbox_dir: Path, arch: str) -> tuple[bool, str]:
+def run(sandbox_dir: Path, arch: str, ext_name: str = "hip_extension") -> tuple[bool, str]:
     sys.path.insert(0, str(sandbox_dir.resolve()))
     try:
         model_mod = load_module_from_file("model", sandbox_dir / "model.py")
@@ -129,7 +130,7 @@ def run(sandbox_dir: Path, arch: str) -> tuple[bool, str]:
             model_new_mod = load_module_from_file("model_new", model_new_path)
             ModelNew = model_new_mod.ModelNew
         else:
-            ModelNew = _make_dynamic_model_new(Model)
+            ModelNew = _make_dynamic_model_new(Model, ext_name)
 
         init_inputs = get_init_inputs()
         if not isinstance(init_inputs, (list, tuple)):

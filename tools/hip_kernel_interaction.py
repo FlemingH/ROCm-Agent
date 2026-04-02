@@ -421,8 +421,9 @@ class HipKernelInteraction:
 
     async def _run_compile(self, sandbox: Path) -> Tuple[bool, str]:
         import sys
+        ext_name = "hip_ext_" + sandbox.name.replace("-", "_")
         return await self._run_cmd(
-            ["bash", "-c", f"cd {sandbox} && PYTORCH_ROCM_ARCH={self.arch} {sys.executable} -m tools.compile --arch {self.arch}"],
+            ["bash", "-c", f"cd {sandbox} && PYTORCH_ROCM_ARCH={self.arch} {sys.executable} -m tools.compile --arch {self.arch} --ext-name {ext_name}"],
             self.compile_timeout,
         )
 
@@ -433,9 +434,10 @@ class HipKernelInteraction:
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
         import tools.verify
+        ext_name = "hip_ext_" + sandbox.name.replace("-", "_")
         # Run in-process to avoid Python startup overhead
         try:
-            ok, msg = tools.verify.run(sandbox / "agent_workdir", self.arch)
+            ok, msg = tools.verify.run(sandbox / "agent_workdir", self.arch, ext_name=ext_name)
             return ok, msg
         except Exception as e:
             import traceback
@@ -447,9 +449,10 @@ class HipKernelInteraction:
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
         import tools.bench
+        ext_name = "hip_ext_" + sandbox.name.replace("-", "_")
         # Run in-process to avoid Python startup overhead
         try:
-            ok, output = tools.bench.run(sandbox / "agent_workdir", self.arch, iters=10)
+            ok, output = tools.bench.run(sandbox / "agent_workdir", self.arch, iters=10, ext_name=ext_name)
             if not ok:
                 return False, {}
             result = self._parse_profile_output(output)

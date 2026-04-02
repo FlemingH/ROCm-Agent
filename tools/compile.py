@@ -30,9 +30,9 @@ def find_sources(arch: str) -> list[str]:
     return sorted(set(root_sources + kernel_sources))
 
 
-def compile_kernels(arch: str) -> int:
+def compile_kernels(arch: str, ext_name: str = 'hip_extension') -> int:
     build_dir = WORKDIR / 'build' / arch
-    output_so = WORKDIR / 'hip_extension.so'
+    output_so = WORKDIR / f'{ext_name}.so'
     sources = find_sources(arch)
 
     if not sources:
@@ -52,7 +52,7 @@ def compile_kernels(arch: str) -> int:
 
     try:
         cpp_ext.load(
-            name='hip_extension',
+            name=ext_name,
             sources=sources,
             build_directory=str(build_dir),
             verbose=False,
@@ -68,27 +68,28 @@ def compile_kernels(arch: str) -> int:
         print(str(exc))
         return 1
 
-    built_so = build_dir / 'hip_extension.so'
+    built_so = build_dir / f'{ext_name}.so'
     if built_so.exists():
         shutil.copy2(built_so, output_so)
         print(f'Compile success: {output_so}')
         return 0
 
-    so_files = list(build_dir.glob('hip_extension*.so'))
+    so_files = list(build_dir.glob(f'{ext_name}*.so'))
     if so_files:
         shutil.copy2(so_files[0], output_so)
         print(f'Compile success: {output_so}')
         return 0
 
-    print('Compilation finished but hip_extension.so was not generated.')
+    print(f'Compilation finished but {ext_name}.so was not generated.')
     return 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
+    parser.add_argument('--ext-name', default='hip_extension')
     args = parser.parse_args()
-    return compile_kernels(args.arch)
+    return compile_kernels(args.arch, args.ext_name)
 
 
 if __name__ == '__main__':
