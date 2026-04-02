@@ -427,6 +427,11 @@ class HipKernelInteraction:
         )
 
     async def _run_verify(self, sandbox: Path) -> Tuple[bool, str]:
+        import sys
+        # Ensure project root is in path so we can import tools.verify
+        project_root = str(Path(__file__).resolve().parent.parent)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
         import tools.verify
         # Run in-process to avoid Python startup overhead
         try:
@@ -437,6 +442,10 @@ class HipKernelInteraction:
             return False, f"Verification script error:\n{traceback.format_exc()}"
 
     async def _run_profile(self, sandbox: Path) -> Tuple[bool, dict]:
+        import sys
+        project_root = str(Path(__file__).resolve().parent.parent)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
         import tools.bench
         # Run in-process to avoid Python startup overhead
         try:
