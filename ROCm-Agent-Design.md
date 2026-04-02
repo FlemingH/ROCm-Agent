@@ -65,14 +65,18 @@
 
 ## 3. 核心机制设计
 
-### 3.1 模型简化输出 (单文件合约) + 动态 Binding
+### 3.1 模型简化输出 (单文件合约) + 动态 Binding + 权重传递
 为降低小模型的认知负荷，防止生成内容超长被截断，模型被要求**只输出 1 个文件**：`fused_kernel.hip`。
 系统的 `hip_kernel_interaction.py` 会在后台自动完成以下后处理：
 1. 自动注入 `#include <hip/hip_runtime.h>`。
-2. **动态解析** `launch_fused_kernel()` 签名，自动合成参数匹配的 `fused_kernel_binding.cpp`（支持额外参数如 `float slope`, `int dim` 等）。
-3. **动态生成** `model_new.py`：解析原始模型 `__init__` 参数，存储为 `self._kp_*`，在 `forward()` 中传递给 HIP 扩展。
+2. **动态解析** `launch_fused_kernel()` 签名，自动合成参数匹配的 `fused_kernel_binding.cpp`。支持标量参数（`float slope`, `int dim`）和指针/张量参数（`const float* weight`）。
+3. **动态权重传递**：`verify.py` 使用 `DynamicModelNew(Model)` 代替静态 `model_new.py`。该类继承原始 Model（保证 `load_state_dict(strict=True)` 成功），在 `forward()` 中自动提取 float32 权重张量传给 HIP 扩展。
+4. **Prompt 权重注入**：`prepare_data.py` 自动实例化 Model，提取 `state_dict` 中的 float32 张量名和形状，注入到 prompt 中，指导 Agent 在 kernel 签名中添加对应的 `const float*` 参数。
 
-**关键改进**：早期版本使用硬编码 binding（仅支持 `(output, input, size, stream)` 4 参数签名），导致仅 ~15% 数据集可用。动态 binding 通过 `parse_kernel_extra_params()` 自动适配任意参数签名。
+**关键改进**：
+- 早期版本使用硬编码 binding（仅支持 `(output, input, size, stream)` 4 参数签名），导致仅 ~12.5% 数据集可用。
+- 动态 binding 通过 `parse_kernel_extra_params()` 自动适配标量参数。
+- **权重传递机制**将可用数据从 12.5% 提升到 ~44.6%（+shape-preserving 有权重样本 1300 条）。Agent 仍只输出单文件 `fused_kernel.hip`，训练时间增幅 <5%。
 
 ### 3.2 保姆级提示词 (SKILL.md) — 极简版
 
@@ -234,12 +238,14 @@ huggingface-cli download ASKDESC/CUDA-Agent-Ops-6K \
 huggingface-cli download janhq/Jan-code-4b \
   --local-dir models/Jan-code-4b
 
-# 准备训练数据 (动态注入 SKILL 模板和精简参考代码)
+# 准备训练数据 (动态注入 SKILL 模板、参考代码、权重信息)
 python3 tools/prepare_data.py \
   --input data/CUDA-Agent-Ops-6K/data.parquet \
-  --output data/rocm_agent_ops/ \
+  --output data/rocm_agent_ops_v5/ \
   --arch gfx1100 \
   --skill agent_workdir/gfx1100/SKILL.md
+# Note: prepare_data.py now auto-extracts weight tensor info from each Model
+# and injects it into the prompt (e.g. "const float* bn_weight shape=(64)")
 
 # ═══ 安装 vLLM（首次）═══
 
@@ -286,8 +292,9 @@ nohup python -u tools/train_grpo.py \
   --max-completion-length 2048 \
   --temperature 0.7 \
   --conservative-eos-stop \
-  --output-dir checkpoints/grpo-jan-code-4b-b16 \
-  > logs/train-b16.log 2>&1 &
+  --train-data data/rocm_agent_ops_v5/train.parquet \
+  --output-dir checkpoints/grpo-jan-code-4b-b17 \
+  > logs/train-b17.log 2>&1 &
 ```
 
 ---
