@@ -294,8 +294,8 @@ nohup python -u tools/train_grpo.py \
   --temperature 0.7 \
   --conservative-eos-stop \
   --train-data data/rocm_agent_ops_v5/train.parquet \
-  --output-dir checkpoints/grpo-jan-code-4b-b22 \
-  > logs/train-b22.log 2>&1 &
+  --output-dir checkpoints/grpo-jan-code-4b-b24 \
+  > logs/train-b24.log 2>&1 &
 ```
 
 ---
