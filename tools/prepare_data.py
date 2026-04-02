@@ -74,6 +74,10 @@ def extract_weight_info(model_code: str) -> str:
         float_items = [(k, v) for k, v in sd.items() if v.is_floating_point()]
         if not float_items:
             return ""
+            
+        # Protect against huge models blowing up the prompt context window (e.g., > 8192 tokens)
+        if len(float_items) > 10:
+            return ""
 
         lines = []
         for key, tensor in float_items:
