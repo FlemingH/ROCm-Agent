@@ -5,20 +5,28 @@
 # PyTorch ROCm (pre-installed in conda env, do NOT pip install from PyPI):
 #   torch==2.9.1+rocm7.2.0
 #   torchvision==0.24.0+rocm7.2.0
-#   torchaudio==2.9.1
+#   torchaudio==2.9.0+rocm7.2.0
 #   triton==3.5.1+rocm7.2.0
 #
-# vLLM ROCm (需手动安装，详见设计文档):
-#   vllm==0.14.0rc1+rocm7.2
-#   amdsmi (pip install /opt/rocm-7.2.0/share/amd_smi/)
-#   flash-attn==2.8.3 (pip install from https://wheels.vllm.ai/rocm/flash-attn/)
+# vLLM ROCm (从 Docker 镜像 rocm-agent-vllm:latest 提取，不可 pip install):
+#   vllm==0.14.0rc1+rocm720
+#   flash-attn==2.8.3 (同样从 Docker 提取，需 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE)
+#   amdsmi (pip install /opt/rocm/share/amd_smi/)
+#
+# ROCm 必需环境变量:
+#   FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+#   HIP_FORCE_DEV_KERNARG=1
+#   HSA_NO_SCRATCH_RECLAIM=1
+#   SAFETENSORS_FAST_GPU=1
+#   TORCH_BLAS_PREFER_HIPBLASLT=1
+#   RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 
 # RL training framework
-trl>=0.29.0
+trl==1.0.0
 accelerate>=1.13.0
 
 # Model & fine-tuning
-transformers>=4.56.2,<5.0
+transformers>=4.57.0,<5.0
 peft>=0.18.0
 safetensors
 tokenizers
@@ -42,3 +50,4 @@ xgrammar
 numba
 llguidance
 fastsafetensors
+einops

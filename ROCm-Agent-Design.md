@@ -18,9 +18,9 @@
 
 | 物理 GPU | 角色 | 环境变量配置 | 说明 |
 |----------|------|----------|------|
-| 0 | vLLM TP shard 0 | `CUDA_VISIBLE_DEVICES=2,3` | 当前机器上 `CUDA 2/3 -> 物理 0/1` |
-| 1 | vLLM TP shard 1 | `CUDA_VISIBLE_DEVICES=2,3` | 提供模型推理生成 |
-| 2 | 训练 | `CUDA_VISIBLE_DEVICES=0,1 --train-gpu 1` | 当前机器上 `CUDA 1 -> 物理 2`，负责反向传播更新权重 |
+| 0 | vLLM TP shard 0 | `HIP_VISIBLE_DEVICES=2,3` | vLLM 进程看到 GPU 0/1 对应物理 GPU 2/3 |
+| 1 | vLLM TP shard 1 | `HIP_VISIBLE_DEVICES=2,3` | 提供模型推理生成 |
+| 2 | 训练 | `HIP_VISIBLE_DEVICES=0,1 --train-gpu 0` | 训练进程 GPU 0 对应物理 GPU 2 |
 | 3 | 评估 | `--eval-gpu 1` | 在空闲副卡（物理3）上开辟独立沙盒进行编译、验证和压测 |
 
 ---
@@ -117,7 +117,7 @@
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | 并发评估 Worker | `8` | 平衡 PCIe 总线负载与 CPU 并发上限 |
-| 有效批量 | 8 | `batch=1` × `grad_accum=8` |
+| 有效批量 | 8 | `batch=1` × `grad_accum=8` (TRL 1.0.0 要求 grad_accum 可被 num_generations 整除) |
 | 生成数 / prompt | `num_generations=4` | |
 | 补全长度 | `2048` | 提供充裕的容错思考空间，借助 EOS 自动停机节省时间 |
 | 探索温度 | `0.7` | 高温探索，鼓励探索高级优化（如 float4, shfl_xor） |
@@ -139,15 +139,20 @@ python3 tools/prepare_data.py \
   --arch gfx1100 \
   --skill agent_workdir/gfx1100/SKILL.md
 
-# ═══ 训练启动（B25 终极稳定版） ═══
+# ═══ 训练启动（B26 TRL 1.0.0 + ROCm vLLM） ═══
+
+# 0. ROCm 必需环境变量（已写入 ~/.bashrc，新终端自动生效）
+#    FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+#    HIP_FORCE_DEV_KERNARG=1  HSA_NO_SCRATCH_RECLAIM=1
+#    SAFETENSORS_FAST_GPU=1   TORCH_BLAS_PREFER_HIPBLASLT=1
+#    RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 
 # 1. 彻底清理环境防止死锁
 pkill -9 -f "train_grpo.py" || true
 pkill -9 -f "vllm" || true
 
 # 2. 终端 1：启动 vLLM 推理服务（物理 GPU 0+1）
-CUDA_VISIBLE_DEVICES=2,3 \
-PYTORCH_ALLOC_CONF=expandable_segments:True \
+HIP_VISIBLE_DEVICES=2,3 \
 nohup python -u tools/vllm_serve.py \
   --model models/Jan-code-4b \
   --tensor_parallel_size 2 \
@@ -156,18 +161,19 @@ nohup python -u tools/vllm_serve.py \
   --max_model_len 8192 \
   --enforce_eager \
   --port 8000 \
-  --trust-remote-code > logs/vllm-jan-code-4b.log 2>&1 &
+  > logs/vllm-jan-code-4b.log 2>&1 &
 
 # 等待 vLLM 显示 Uvicorn running 启动成功后...
+# curl http://localhost:8000/health/  → {"status":"ok"}
 
 # 3. 终端 2：启动 GRPO 训练（物理 GPU 2 训练，物理 GPU 3 评估）
-CUDA_VISIBLE_DEVICES=0,1 \
-PYTORCH_ALLOC_CONF=expandable_segments:True \
+#    注意：TRL 1.0.0 要求 generation_batch_size (= batch × grad_accum) 可被 num_generations 整除
+HIP_VISIBLE_DEVICES=0,1 \
 nohup python -u tools/train_grpo.py \
   --model models/Jan-code-4b \
   --use-vllm \
   --vllm-port 8000 \
-  --train-gpu 1 \
+  --train-gpu 0 \
   --eval-gpu 1 \
   --arch gfx1100 \
   --batch-size 1 \
@@ -178,6 +184,6 @@ nohup python -u tools/train_grpo.py \
   --temperature 0.7 \
   --conservative-eos-stop \
   --train-data data/rocm_agent_ops_v5/train.parquet \
-  --output-dir checkpoints/grpo-jan-code-4b-b25 \
-  > logs/train-b25.log 2>&1 &
+  --output-dir checkpoints/grpo-jan-code-4b-b26 \
+  > logs/train-b26.log 2>&1 &
 ```
