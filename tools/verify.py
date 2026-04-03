@@ -204,9 +204,10 @@ def run(sandbox_dir: Path, arch: str, ext_name: str = "hip_extension") -> tuple[
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
+    parser.add_argument('--ext-name', default='hip_extension')
     args = parser.parse_args()
 
-    ok, msg = run(WORKDIR, args.arch)
+    ok, msg = run(WORKDIR, args.arch, ext_name=args.ext_name)
     print(msg)
     if not ok:
         sys.exit(1)

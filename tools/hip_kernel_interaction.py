@@ -429,36 +429,23 @@ class HipKernelInteraction:
 
     async def _run_verify(self, sandbox: Path) -> Tuple[bool, str]:
         import sys
-        # Ensure project root is in path so we can import tools.verify
-        project_root = str(Path(__file__).resolve().parent.parent)
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        import tools.verify
         ext_name = "hip_ext_" + sandbox.name.replace("-", "_")
-        # Run in-process to avoid Python startup overhead
-        try:
-            ok, msg = tools.verify.run(sandbox / "agent_workdir", self.arch, ext_name=ext_name)
-            return ok, msg
-        except Exception as e:
-            import traceback
-            return False, f"Verification script error:\n{traceback.format_exc()}"
+        return await self._run_cmd(
+            ["bash", "-c", f"cd {sandbox} && {sys.executable} -m tools.verify --arch {self.arch} --ext-name {ext_name}"],
+            self.verify_timeout, use_eval_gpu=True,
+        )
 
     async def _run_profile(self, sandbox: Path) -> Tuple[bool, dict]:
         import sys
-        project_root = str(Path(__file__).resolve().parent.parent)
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        import tools.bench
         ext_name = "hip_ext_" + sandbox.name.replace("-", "_")
-        # Run in-process to avoid Python startup overhead
-        try:
-            ok, output = tools.bench.run(sandbox / "agent_workdir", self.arch, iters=10, ext_name=ext_name)
-            if not ok:
-                return False, {}
-            result = self._parse_profile_output(output)
-            return (True, result) if result else (False, {})
-        except Exception as e:
+        ok, output = await self._run_cmd(
+            ["bash", "-c", f"cd {sandbox} && {sys.executable} -m tools.bench --arch {self.arch} --iters 10 --ext-name {ext_name}"],
+            self.profile_timeout, use_eval_gpu=True,
+        )
+        if not ok:
             return False, {}
+        result = self._parse_profile_output(output)
+        return (True, result) if result else (False, {})
 
     async def _run_cmd(self, cmd: list, timeout: int, use_eval_gpu: bool = False) -> Tuple[bool, str]:
         try:

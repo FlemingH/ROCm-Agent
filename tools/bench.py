@@ -131,9 +131,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--arch', default=os.environ.get('PYTORCH_ROCM_ARCH', 'gfx1201'))
     parser.add_argument("--iters", type=int, default=10)
+    parser.add_argument('--ext-name', default='hip_extension')
     args = parser.parse_args()
 
-    ok, msg = run(WORKDIR, args.arch, args.iters)
+    ok, msg = run(WORKDIR, args.arch, args.iters, ext_name=args.ext_name)
     print(msg)
     if not ok:
         sys.exit(1)
