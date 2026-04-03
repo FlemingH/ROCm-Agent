@@ -465,6 +465,9 @@ class HipKernelInteraction:
                 # MUST remove these to prevent PyTorch ROCm backend confusion
                 env.pop("HIP_VISIBLE_DEVICES", None)
                 env.pop("ROCR_VISIBLE_DEVICES", None)
+                
+                # Limit memory to prevent 8 parallel workers from OOM'ing on GPU 1
+                env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
