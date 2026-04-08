@@ -1,4 +1,4 @@
-# ROCm-Agent：面向 AMD GPU 的高性能 HIP 内核生成 Agent
+# ROCm-Train-Agent：面向 AMD GPU 的高性能 HIP 内核生成 Agent
 
 基于 GRPO 强化学习训练 Agent，自动将 PyTorch 模型转化为 AMD GPU 上的高性能 HIP 内核。
 
