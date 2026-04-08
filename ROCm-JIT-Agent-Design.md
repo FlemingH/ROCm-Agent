@@ -1,4 +1,4 @@
-# ROCm-Gen-Agent：AI-in-the-Loop 本地算子锻造引擎 (Kernel Forge)
+# ROCm-JIT-Agent：AI-in-the-Loop 本地算子锻造引擎 (Kernel Forge)
 
 ## 1. 愿景与目标用户 (The Vision & Target Audience)
 
@@ -6,19 +6,19 @@
 
 传统的 AI 算子优化是一个漫长且痛苦的离线过程，需要顶尖的工程师手写 C++/HIP、调试内存对齐、解决寄存器溢出。更致命的是，这些能力往往被锁死在财力量雄厚的机房或需要联网调用的超大杯闭源模型（如 GPT-4o）中。
 
-**ROCm-Gen-Agent** 敏锐地切入了**“算力下沉与端侧 AI 爆发”**的蓝海。它的核心产品故事并非面向普通终端消费者的实时加速，而是**专为开源极客、中小型科研团队、边缘计算（Edge AI）部署工程师打造的“本地高性能算子锻造炉”**。
+**ROCm-JIT-Agent** 敏锐地切入了**“算力下沉与端侧 AI 爆发”**的蓝海。它的核心产品故事并非面向普通终端消费者的实时加速，而是**专为开源极客、中小型科研团队、边缘计算（Edge AI）部署工程师打造的“本地高性能算子锻造炉”**。
 
 通过 GRPO 强化学习，我们成功将 AMD RDNA 架构的底层汇编智慧，压缩到了一个仅需极低显存即可运行的 **4B 专精代码模型**中。这意味着，任何开发者都能在他们那张单薄的 7900 XTX 甚至 7900 GRE 上，于完全离线、隐私安全的环境下，为自己的创新算法（如最新的 Sparse Attention 或魔改的量化解包）瞬间生成比肩官方驱动工程师水准的极速算子。
 
 ### 1.1 极客感十足的交互体验
 
-用户无需离开熟悉的 PyTorch 环境，只需在性能瓶颈的模块上添加一个简单的装饰器 `@rocm_gen_agent.optimize`：
+用户无需离开熟悉的 PyTorch 环境，只需在性能瓶颈的模块上添加一个简单的装饰器 `@rocm_jit_agent.optimize`：
 
 ```python
 import torch
-import rocm_gen_agent
+import rocm_jit_agent
 
-@rocm_gen_agent.optimize(target="gfx1100", backend="local:Jan-code-4b")
+@rocm_jit_agent.optimize(target="gfx1100", backend="local:Jan-code-4b")
 def custom_attention_or_swish(x, weight, bias):
     # 用户熟悉的、可能很慢的 PyTorch 逻辑
     return torch.sigmoid(x) * weight + bias
@@ -29,8 +29,8 @@ def custom_attention_or_swish(x, weight, bias):
         x_names=['N'],
         x_vals=[128 * i for i in range(2, 50)],
         line_arg='provider',
-        line_vals=['torch-native', 'torch-compile', 'rocm-gen-agent'],
-        line_names=["Torch (Eager)", "Torch (Compiled)", "ROCm-Gen-Agent"],
+        line_vals=['torch-native', 'torch-compile', 'rocm-jit-agent'],
+        line_names=["Torch (Eager)", "Torch (Compiled)", "ROCm-JIT-Agent"],
         styles=[('blue', '-'), ('green', '--'), ('red', '-')],
         ylabel="GB/s",
         plot_name="swish_performance",
@@ -47,7 +47,7 @@ def benchmark(M, N, provider):
     if provider == 'torch-compile':
         compiled_fn = torch.compile(lambda: torch.sigmoid(x) * w + b)
         ms, min_ms, max_ms = triton.testing.do_bench(compiled_fn)
-    if provider == 'rocm-gen-agent':
+    if provider == 'rocm-jit-agent':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: custom_attention_or_swish(x, w, b))
         
     gbps = lambda ms: 3 * x.nelement() * x.element_size() * 1e-9 / (ms * 1e-3)
@@ -59,13 +59,13 @@ benchmark.run(print_data=True, save_path='.')
 **运行表现：**
 当该前沿算子被部署或训练脚本**第一次**运行触发时，控制台将由于后台的 JIT 试错产生十几秒的启动延迟（在长达数天的科研训练或端侧一次性部署面前，这十几秒微不足道），并弹出一个极具硬核感的命令行进度提示：
 ```text
-[rocm_gen_agent] 侦测到未优化的 PyTorch 算子，正在唤醒 4B 本地专精模型伴随编译...
-[rocm_gen_agent] AI 分析张量签名: input(1024x1024, fp32), weight(1024, fp32)...
-[rocm_gen_agent] [Iter 1/4] 生成 RDNA3 (gfx1100) 底层 HIP 算子... 编译成功.
-[rocm_gen_agent] rocprofv3 硬件级探测: 发现 FMA 乘加融合丢失，VGPR过载，强制指令 AI 重构...
-[rocm_gen_agent] [Iter 2/4] 代码重构中... 验证完美通过! MSE=0.0.
-[rocm_gen_agent] ✨ 锻造成功！Torch Eager: 144.5us -> AI HIP Kernel: 15.2us (提速 9.5x)
-[rocm_gen_agent] 💾 已将极速算子硬编码至 ~/.rocm_gen_agent_cache/，后续所有的训练/推理 Epoch 将零延迟介入。
+[rocm_jit_agent] 侦测到未优化的 PyTorch 算子，正在唤醒 4B 本地专精模型伴随编译...
+[rocm_jit_agent] AI 分析张量签名: input(1024x1024, fp32), weight(1024, fp32)...
+[rocm_jit_agent] [Iter 1/4] 生成 RDNA3 (gfx1100) 底层 HIP 算子... 编译成功.
+[rocm_jit_agent] rocprofv3 硬件级探测: 发现 FMA 乘加融合丢失，VGPR过载，强制指令 AI 重构...
+[rocm_jit_agent] [Iter 2/4] 代码重构中... 验证完美通过! MSE=0.0.
+[rocm_jit_agent] ✨ 锻造成功！Torch Eager: 144.5us -> AI HIP Kernel: 15.2us (提速 9.5x)
+[rocm_jit_agent] 💾 已将极速算子硬编码至 ~/.rocm_jit_agent_cache/，后续所有的训练/推理 Epoch 将零延迟介入。
 ```
 
 随后的所有调用，将直接挂载并执行这个被 AI “压榨”到硬件极限的 `.so` 动态库。
@@ -77,7 +77,7 @@ benchmark.run(print_data=True, save_path='.')
 为了实现极高的鲁棒性与生态兼容性，该系统 采用了**“模型无关（Model-Agnostic）”**的架构设计。模型只负责根据 Prompt 吐出代码字符串，而外壳全权接管整个工程管线。
 
 ### 2.1 第一层：前端拦截与 AST 分析层
-*   **职责**：在 Python 运行时动态拦截带有 `@rocm_gen_agent.optimize` 的函数。
+*   **职责**：在 Python 运行时动态拦截带有 `@rocm_jit_agent.optimize` 的函数。
 *   **机制**：通过 Python 的 `inspect` 模块提取函数源码的 AST（抽象语法树），抓取输入张量的 `shape` 和 `dtype`，自动合成包含算子逻辑和权重参数（如 `weight`, `bias`）信息的初始 User Prompt。
 
 ### 2.2 第二层：LLM 网关适配层 (Gateway)
