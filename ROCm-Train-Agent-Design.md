@@ -18,10 +18,10 @@
 
 | 物理 GPU | 角色 | 环境变量配置 | 说明 |
 |----------|------|----------|------|
-| 0 | vLLM TP shard 0 | `HIP_VISIBLE_DEVICES=2,3` | vLLM 进程看到 GPU 0/1 对应物理 GPU 2/3 |
-| 1 | vLLM TP shard 1 | `HIP_VISIBLE_DEVICES=2,3` | 提供模型推理生成 |
-| 2 | 训练 | `HIP_VISIBLE_DEVICES=0,1 --train-gpu 0` | 训练进程 GPU 0 对应物理 GPU 2 |
-| 3 | 评估 | `--eval-gpu 1` | 在空闲副卡（物理3）上开辟独立沙盒进行编译、验证和压测 |
+| 0 | 训练 | `CUDA_VISIBLE_DEVICES=0,1 --train-gpu 0` | 训练进程的 GPU 0 对应物理 GPU 0，负责反向传播更新权重 |
+| 1 | 评估 | `--eval-gpu 1` | 训练进程的 GPU 1 对应物理 GPU 1，在空闲副卡上开辟独立沙盒进行编译、验证和压测 |
+| 2 | vLLM TP shard 0 | `CUDA_VISIBLE_DEVICES=2,3` | vLLM 进程看到的 GPU 0 对应物理 GPU 2，提供模型推理生成 |
+| 3 | vLLM TP shard 1 | `CUDA_VISIBLE_DEVICES=2,3` | vLLM 进程看到的 GPU 1 对应物理 GPU 3，提供模型推理生成 |
 
 ---
 
@@ -29,7 +29,7 @@
 
 ```text
                     ┌────────────────────────────────────┐
-                    │  Host vLLM Server (物理 GPU 0 + 1)  │
+                    │  Host vLLM Server (物理 GPU 2 + 3)  │
                     │  tools/vllm_serve.py, TP = 2       │
                     │  PagedAttention + Continuous Batch  │
   ┌── HTTP req ───→ │  BF16 autoregressive decoding      │
@@ -37,11 +37,11 @@
   │                                 │ HTTP: completions
   │                                 ↓
   │   ┌──────────────────────────────────────────────────┐
-  │   │  Host GPU 2: TRL GRPOTrainer                     │
+  │   │  Host GPU 0: TRL GRPOTrainer                     │
   │   │  use_vllm=True, vllm_mode="server"               │
   │   │                                                  │
   │   │  1. 发送 batch prompts → vLLM 生成 completions   │
-  │   │  2. 提交 completions → CPU 编译 + GPU 3 验证     │
+  │   │  2. 提交 completions → CPU 编译 + GPU 1 验证     │
   │   │  3. 收集 rewards (MSE + 性能测速)                 │
   │   │  4. Forward → GRPO loss → Backward → 更新 LoRA   │
   │   │  5. HTTP: 同步 LoRA 权重 → vLLM                  │
@@ -56,7 +56,7 @@
                             │ 编译通过后
                             ↓
               ┌──────────────────────────┐
-              │  GPU 3: verify + bench   │──→ 奖励分数 (-1.0 ~ +3.0)
+              │  GPU 1: verify + bench   │──→ 奖励分数 (-1.0 ~ +3.0)
               │  eval-gpu=1 (严格物理隔离) │
               └──────────────────────────┘
 ```
@@ -151,8 +151,9 @@ python3 tools/prepare_data.py \
 pkill -9 -f "train_grpo.py" || true
 pkill -9 -f "vllm" || true
 
-# 2. 终端 1：启动 vLLM 推理服务（物理 GPU 0+1）
-HIP_VISIBLE_DEVICES=2,3 \
+# 2. 终端 1：启动 vLLM 推理服务（物理 GPU 2+3）
+CUDA_VISIBLE_DEVICES=2,3 \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
 nohup python -u tools/vllm_serve.py \
   --model models/Jan-code-4b \
   --tensor_parallel_size 2 \
@@ -166,9 +167,10 @@ nohup python -u tools/vllm_serve.py \
 # 等待 vLLM 显示 Uvicorn running 启动成功后...
 # curl http://localhost:8000/health/  → {"status":"ok"}
 
-# 3. 终端 2：启动 GRPO 训练（物理 GPU 2 训练，物理 GPU 3 评估）
+# 3. 终端 2：启动 GRPO 训练（物理 GPU 0 训练，物理 GPU 1 评估）
 #    注意：TRL 1.0.0 要求 generation_batch_size (= batch × grad_accum) 可被 num_generations 整除
-HIP_VISIBLE_DEVICES=0,1 \
+CUDA_VISIBLE_DEVICES=0,1 \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
 nohup python -u tools/train_grpo.py \
   --model models/Jan-code-4b \
   --use-vllm \
@@ -187,3 +189,42 @@ nohup python -u tools/train_grpo.py \
   --output-dir checkpoints/grpo-jan-code-4b-b26 \
   > logs/train-b26.log 2>&1 &
 ```
+
+---
+
+## 5. 训练过程与踩坑记录 (Training Process & Pitfalls)
+
+在 ROCm-Agent 的整个迭代与训练过程中，我们经历了多轮重构与调优（一直迭代至 B26 稳定版），最终打造出了当前的高并发、高稳定、高容错训练管线。以下是核心的踩坑与解决记录：
+
+### 5.1 显存 OOM 与严格物理隔离
+* **坑**：最初尝试 8B 模型并开启 GRPO 时，即使在 32GB 显存的 W7800 上也会迅速遭遇 OOM。
+* **解**：
+  1. 切换至 4B 级别模型 (`janhq/Jan-code-4b`)，兼顾代码理解能力与显存占用。
+  2. 采用**严格的物理显卡隔离**架构：将负责大批量并发生成的 vLLM 部署在 GPU 0+1，主训练进程部署在 GPU 2，编译与验证沙盒隔离在 GPU 3。辅以 `batch-size=1` 与 `gradient-accumulation=8`，彻底根治了 OOM 问题。
+
+### 5.2 多进程并发死锁 (Deadlocks)
+* **坑**：在拉起 8 个 CPU Worker 并发进行内核编译与测试时，Python 的 `multiprocessing` 默认使用 `fork` 模式。这连带复制了主进程的 vLLM 和 CUDA 状态，导致底层 C++ 驱动锁状态错乱，引发了严重的 NCCL/RCCL 通信死锁与 `BrokenProcessPool` 崩溃。
+* **解**：在 `train_grpo.py` 入口强制启用 `spawn` 模式 (`multiprocessing.set_start_method("spawn", force=True)`)，确保每个评测 Worker 都是全新纯净的 Python 进程，不继承任何危险的父进程状态。
+
+### 5.3 动态库挂载污染 (C-Extension Caching Bug)
+* **坑**：为了加速打分，曾尝试将编译验证环节（`verify.py`）改为进程内 (`in-process`) `import` 调用。但 Python 的 `dlopen` 会永久缓存同名动态库，导致模型即使生成了新代码，底层调用的依然是旧版 `hip_extension.so` 缓存，奖励分数被彻底打乱。
+* **解**：退回到纯正的 `subprocess.run` 沙盒隔离执行，并为每次生成的动态库赋予唯一的哈希后缀 (`hip_ext_UUID.so`)。牺牲了 1 秒的进程启动时间，但换来了 100% 绝对正确的奖励验证反馈。
+
+### 5.4 输出格式失控与截断假象 (Truncation)
+* **坑**：模型早期经常陷入长篇大论的 `<think>` 思考过程，导致输出轻松顶破 2048 Token 上限被截断。
+* **解**：
+  1. 缩减并重构 `SKILL.md`，要求绝对的单文件代码块输出。
+  2. 在 vLLM 中显式配置停机词 `<END_OF_OUTPUT>`。模型一写完立即熔断推理，将每条数据的均长压缩到了 300~400 tokens，节省了巨量算力。
+  3. （注：TRL 日志中的 `clipped_ratio=1.0` 仅仅是因为停机词非原生 EOS 触发的日志判断 Bug，底层梯度传播依然完全正常）。
+
+### 5.5 TRL FSDP+PEFT 官方 Bug 
+* **坑**：尝试开启 FSDP 多卡切分训练架构时，引发 vLLM 端频繁崩溃死锁（报错：`No module named 'base_model'`）。
+* **解**：排查 TRL `v1.0.0` 源码发现，其 `_sync_fsdp1_params_to_vllm` 同步函数中漏写了对 LoRA 特有权重的过滤逻辑。最终我们果断撤回 FSDP，退回单卡反向传播架构，规避了这一第三方库的致命隐雷。
+
+### 5.6 硬件瞬时故障与完美断点续训 (Checkpoint Resume)
+* **坑**：在 B26 跑了整整 57 个小时（94% 进度）后，高压运行的 GPU 发生偶发硬件报错 (`HIP error: unspecified launch failure`)，训练中断。
+* **解**：依赖我们预置的 `save_steps=50` 自动存档机制，系统完美留存了 Step 2500 的模型切片。通过为 Trainer 添加 `--resume-from-checkpoint` 参数，成功无缝加载优化器状态并断点续训，将前 50 小时的算力心血全部抢救了回来，顺利奔向 2700 步终点。
+
+### 5.7 训练结果简述
+经过上述密集的趟坑与调优，ROCm-Agent 最终跑出了难以置信的稳定性与有效性：
+在稳定的断点续训与评估循环中，模型生成的 C++ 代码**基础语法合规率达到了恐怖的 100%**（未出现过 -0.5 惩罚）。凭借精心设计的**连续 MSE 卷面分机制**，模型可以在算理尚未绝对精确时持续获得 `0.05~0.8` 的正向连续梯度。它稳步摸索 RDNA3 的底层特性，并开始成功写出附带 `__launch_bounds__(256)`、网格步长循环与基础数据类型的有效算子，证明了基于 RLHF 让大模型自主写 HIP 高性能计算内核的路径是彻底走得通的！
